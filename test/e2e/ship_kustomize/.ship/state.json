@@ -1,0 +1,33 @@
+{
+  "v1": {
+    "config": {},
+    "releaseName": "test",
+    "kustomize": {
+      "overlays": {
+        "ship": {
+          "patches": {
+            "/charts/postgresql/templates/deployment.yaml": "apiVersion: extensions/v1beta1\nkind: Deployment\nmetadata:\n  labels:\n    app: postgresql\n    chart: postgresql-1.0.0\n    heritage: Tiller\n    release: test\n  name: test-postgresql\nspec:\n  template:\n    spec:\n      $setElementOrder/containers:\n      - name: test-postgresql\n      containers:\n      - args: []\n        name: test-postgresql\n",
+            "/charts/postgresql/templates/pvc.yaml": "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  annotations:\n    helm.sh/resource-policy: delete\n  labels:\n    app: postgresql\n    chart: postgresql-1.0.0\n    heritage: Tiller\n    release: test\n  name: test-postgresql\n",
+            "/engine_configmap.yaml": "apiVersion: v1\ndata:\n  ARGO_WORKFLOW: \"Test\"\nkind: ConfigMap\nmetadata:\n  labels:\n    app: test-anchore-engine\n    chart: anchore-engine-0.10.0\n    heritage: Tiller\n    release: test\n  name: test-anchore-engine\n"
+          }
+        }
+      }
+    },
+    "upstream": "github.com/helm/charts/stable/anchore-engine",
+    "metadata": {
+      "applicationType": "helm",
+      "icon": "https://anchore.com/wp-content/uploads/2016/08/anchore.png",
+      "name": "anchore-engine"
+    }
+    "lifecycle": {
+      "stepsCompleted": {
+        "intro": true,
+        "kustomize": true,
+        "kustomize-intro": true,
+        "outro": true,
+        "render": true,
+        "values": true
+      }
+    }
+  }
+}

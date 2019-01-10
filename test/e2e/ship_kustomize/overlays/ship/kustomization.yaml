@@ -1,0 +1,8 @@
+kind: ""
+apiversion: ""
+bases:
+- ../../base
+patchesStrategicMerge:
+- charts/postgresql/templates/deployment.yaml
+- charts/postgresql/templates/pvc.yaml
+- engine_configmap.yaml

@@ -1,0 +1,11 @@
+anchoreGlobal:
+  image:
+    pullPolicy: Always
+  ingress:
+    enabled: true
+    annotations: null
+anchoreApi:
+  ingress:
+    path: /v1/*
+  service:
+    type: NodePort
