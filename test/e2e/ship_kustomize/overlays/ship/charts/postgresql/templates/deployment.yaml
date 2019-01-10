@@ -1,0 +1,17 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: postgresql
+    chart: postgresql-1.0.0
+    heritage: Tiller
+    release: test
+  name: test-postgresql
+spec:
+  template:
+    spec:
+      $setElementOrder/containers:
+      - name: test-postgresql
+      containers:
+      - args: []
+        name: test-postgresql

@@ -1,0 +1,70 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: e2e-anchore-engine-
+spec:
+  entrypoint: e2e-tests
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ "ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+  
+  templates:
+  - name: e2e-tests
+    steps:
+    - - name: ship-helm-chart
+        template: ship-helm-chart
+    - - name: create-configmap
+        template: create-configmap
+    - - name: kustomize-build
+        template: kustomize-build
+    - - name: deploy-anchore-engine
+        template: deploy-anchore-engine
+
+  - name: ship-helm-chart
+    inputs:
+      artifacts:
+      - name: anchore-engine-source
+        path: /mnt/vol/anchore-engine
+        git:
+          repo: https://github.com/btodhunter/anchore-engine.git
+          revision: "e2e_testing"
+    container:
+      image: docker.io/replicated/ship:0.30.0
+      args: ["update"]
+      workingDir: /mnt/vol/anchore-engine/test/e2e/ship_kustomize
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/vol
+ 
+  - name: create-configmap
+    container:
+      image: docker.io/python:2
+      args: ["create_configmap.py"]
+      workingDir:
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/vol/anchore-engine/test/e2e/
+
+  - name: kustomize-build
+    container:
+      image: docker.io/bitlayer/kustomize
+      args: ["build", ">", "kustomized.yaml"]
+      workingDir: /mnt/vol/anchore-engine/test/e2e/ship_kustomize/overlays/ship/
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/vol
+
+  - name: deploy-anchore-engine
+    container:
+      image: quay.io/helmpack/chart-testing:v2.1.0
+      command: ["kubectl"]
+      args: ["apply", "-f", "kustomized.yaml"]
+      workingDir:
+      volumeMounts:
+      - name: workdir
+        mountPath: /mnt/vol/anchore-engine/test/e2e/ship_kustomize/overlays/ship/

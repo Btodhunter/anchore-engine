@@ -1,0 +1,11 @@
+apiVersion: v1
+data:
+  ARGO_WORKFLOW: "Test"
+kind: ConfigMap
+metadata:
+  labels:
+    app: test-anchore-engine
+    chart: anchore-engine-0.10.0
+    heritage: Tiller
+    release: test
+  name: test-anchore-engine
