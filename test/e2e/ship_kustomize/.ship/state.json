@@ -18,7 +18,7 @@
       "applicationType": "helm",
       "icon": "https://anchore.com/wp-content/uploads/2016/08/anchore.png",
       "name": "anchore-engine"
-    }
+    },
     "lifecycle": {
       "stepsCompleted": {
         "intro": true,

@@ -34,7 +34,7 @@ spec:
           repo: https://github.com/btodhunter/anchore-engine.git
           revision: "e2e_testing"
     container:
-      image: docker.io/replicated/ship:0.30.0
+      image: docker.io/replicated/ship:0.29.0
       args: ["update"]
       workingDir: /mnt/vol/anchore-engine/test/e2e/ship_kustomize
       volumeMounts:
