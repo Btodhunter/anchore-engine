@@ -1,0 +1,8 @@
+FROM bitnami/kubectl
+
+RUN wget -O /usr/local/bin/kustomize https://github.com/kubernetes-sigs/kustomize/releases/download/v${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64 && \
+  chmod +x /usr/local/bin/kustomize
+
+RUN curl -sSL https://github.com/replicatedhq/ship/releases/download/v0.29.0/ship_0.29.0_linux_amd64.tar.gz | tar xv && \
+sudo mv ship /usr/local/bin
+

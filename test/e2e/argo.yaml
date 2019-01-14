@@ -3,68 +3,216 @@ kind: Workflow
 metadata:
   generateName: e2e-anchore-engine-
 spec:
-  entrypoint: e2e-tests
+  arguments:
+    parameters:
+    - name: test-dirs
+      value: |
+        ["load-test", "s3-archive", "swift-archive"]
+    - name: commit-sha
+      value: "abcdefg123456"
+  entrypoint: start-tests
+  onExit: delete-anchore-engine 
   volumeClaimTemplates:
   - metadata:
-      name: workdir
+      name: workdir-load-test
     spec:
       accessModes: [ "ReadWriteOnce"]
       resources:
         requests:
-          storage: 1Gi
-  
+          storage: 100Mi
+  - metadata:
+      name: workdir-s3-archive
+    spec:
+      accessModes: [ "ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 100Mi
+  - metadata:
+      name: workdir-swift-archive
+    spec:
+      accessModes: [ "ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 100Mi
+
   templates:
+  - name: start-tests
+    inputs:
+      parameters:
+        - name: test-dirs
+        - name: commit-sha
+    steps:
+    - - name: e2e-tests
+        template: e2e-tests
+        withParam: "{{inputs.parameters.test-dirs}}"
+        arguments:
+          parameters:
+          - name: test-dir
+            value: "{{item}}"
+          - name: commit-sha
+            value: "{{inputs.parameters.commit-sha}}"
+  
   - name: e2e-tests
+    inputs:
+      parameters:
+      - name: test-dir
+      - name: commit-sha
     steps:
     - - name: ship-helm-chart
         template: ship-helm-chart
+        arguments:
+          parameters:
+          - name: config-path
+            value: "{{inputs.parameters.test-dir}}"
+          - name: commit-sha
+            value: "{{inputs.parameters.commit-sha}}"
     - - name: create-configmap
         template: create-configmap
+        arguments:
+          parameters:
+          - name: config-path
+            value: "{{inputs.parameters.test-dir}}"
+          - name: commit-sha
+            value: "{{inputs.parameters.commit-sha}}"
     - - name: kustomize-build
         template: kustomize-build
+        arguments:
+          parameters:
+          - name: config-path
+            value: "{{inputs.parameters.test-dir}}"
     - - name: deploy-anchore-engine
         template: deploy-anchore-engine
+        arguments:
+          parameters:
+          - name: config-path
+            value: "{{inputs.parameters.test-dir}}"
+          - name: commit-sha
+            value: "{{inputs.parameters.commit-sha}}"
+    - - name: wait-anchore-engine
+        template: wait-anchore-engine
+        arguments:
+          parameters:
+          - name: config-path
+            value: "{{inputs.parameters.test-dir}}"
+          - name: commit-sha
+            value: "{{inputs.parameters.commit-sha}}"
+    - - name: run-tests
+        template: run-tests
+        arguments:
+          parameters:
+          - name: config-path
+            value: "{{inputs.parameters.test-dir}}"
+          - name: commit-sha
+            value: "{{inputs.parameters.commit-sha}}"
 
   - name: ship-helm-chart
     inputs:
+      parameters:
+      - name: config-path
+      - name: commit-sha
       artifacts:
       - name: anchore-engine-source
-        path: /mnt/vol/anchore-engine
+        path: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine"
         git:
           repo: https://github.com/btodhunter/anchore-engine.git
           revision: "e2e_testing"
     container:
       image: docker.io/replicated/ship:0.29.0
-      args: ["update"]
-      workingDir: /mnt/vol/anchore-engine/test/e2e/ship_kustomize
+      args: ["update", "--helm-values-file", "{{inputs.parameters.config-path}}/values.yaml"]
+      workingDir: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/ship_kustomize"
       volumeMounts:
-      - name: workdir
-        mountPath: /mnt/vol
+      - name: "workdir-{{inputs.parameters.config-path}}"
+        mountPath: /mnt/vol/
  
   - name: create-configmap
+    inputs:
+      parameters:
+      - name: config-path
+      - name: commit-sha
     container:
       image: docker.io/python:2
-      args: ["create_configmap.py"]
-      workingDir:
+      command: ["/bin/sh"]
+      args: ["-c", "pip install pyyaml && python create_configmap.py {{inputs.parameters.config-path}}/config.yaml {{inputs.parameters.commit-sha}}"]
+      workingDir: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/"
       volumeMounts:
-      - name: workdir
-        mountPath: /mnt/vol/anchore-engine/test/e2e/
+      - name: "workdir-{{inputs.parameters.config-path}}"
+        mountPath: /mnt/vol
 
   - name: kustomize-build
+    inputs:
+        parameters:
+        - name: config-path
     container:
-      image: docker.io/bitlayer/kustomize
-      args: ["build", ">", "kustomized.yaml"]
-      workingDir: /mnt/vol/anchore-engine/test/e2e/ship_kustomize/overlays/ship/
+      image: docker.io/bitlayer/kustomize:v1.0.11
+      command: ["/bin/sh"]
+      args: ["-c", "kustomize build > kustomized.yaml"]
+      workingDir: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/ship_kustomize/overlays/ship/"
       volumeMounts:
-      - name: workdir
+      - name: "workdir-{{inputs.parameters.config-path}}"
         mountPath: /mnt/vol
 
   - name: deploy-anchore-engine
+    inputs:
+      parameters:
+      - name: config-path
+      - name: commit-sha
     container:
-      image: quay.io/helmpack/chart-testing:v2.1.0
+      image: docker.io/bitnami/kubectl:1.9
       command: ["kubectl"]
-      args: ["apply", "-f", "kustomized.yaml"]
-      workingDir:
+      args: ["apply", "-f", "kustomized.yaml", "-n", "{{inputs.parameters.config-path}}-{{inputs.parameters.commit-sha}}"]
+      workingDir: /mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/ship_kustomize/overlays/ship/
       volumeMounts:
-      - name: workdir
-        mountPath: /mnt/vol/anchore-engine/test/e2e/ship_kustomize/overlays/ship/
+      - name: "workdir-{{inputs.parameters.config-path}}"
+        mountPath: /mnt/vol
+
+  - name: wait-anchore-engine
+    inputs:
+      parameters:
+      - name: config-path
+      - name: commit-sha
+    container:
+      image: docker.io/anchore/anchore-engine:latest
+      command: ["anchore-cli"]
+      args: ["system", "wait", "--feedsready", ""]
+      env:
+      - name: ANCHORE_CLI_URL
+        value: "http://test-anchore-engine-api.{{inputs.parameters.config-path}}-{{inputs.parameters.commit-sha}}.svc.cluster.local:8228/v1"
+      - name: ANCHORE_CLI_USER
+        value: admin
+      - name: ANCHORE_CLI_PASS
+        value: foobar
+
+  - name: run-tests
+    inputs:
+      parameters:
+      - name: config-path
+      - name: commit-sha
+    container:
+      image: docker.io/python:3.6
+      command: ["/bin/sh"]
+      args: ["-c", "pip install tox && tox test/functional"]
+      workingDir: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/"
+      volumeMounts:
+      - name: "workdir-{{inputs.parameters.config-path}}"
+        mountPath: /mnt/vol
+      env:
+      - name: ANCHORE_CLI_URL
+        value: "http://test-anchore-engine-api.{{inputs.parameters.config-path}}-{{inputs.parameters.commit-sha}}.svc.cluster.local:8228/v1"
+      - name: ANCHORE_CLI_USER
+        value: admin
+      - name: ANCHORE_CLI_PASS
+        value: foobar
+
+  - name: delete-anchore-engine
+    inputs:
+        parameters:
+        - name: test-dirs
+        - name: commit-sha
+    container:
+      image: docker.io/bitnami/kubectl:1.9
+      command: ["kubectl"]
+      args: ["delete", "-f", "kustomized.yaml", "-n", "{{inputs.parameters.test-dirs}}-{{inputs.parameters.commit-sha}}"]
+      workingDir: "/mnt/vol/{{inputs.parameters.test-dirs}}/anchore-engine/test/e2e/ship_kustomize/overlays/ship/"
+      volumeMounts:
+      - name: "workdir-{{inputs.parameters.test-dirs}}"
+        mountPath: /mnt/vol
