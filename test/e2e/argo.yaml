@@ -132,7 +132,7 @@ spec:
     container:
       image: docker.io/python:2
       command: ["/bin/sh"]
-      args: ["-c", "pip install pyyaml && python create_configmap.py {{inputs.parameters.config-path}}/config.yaml {{inputs.parameters.commit-sha}}"]
+      args: ["-c", "pip install pyyaml && python create_configmap.py {{inputs.parameters.commit-sha}} {{inputs.parameters.config-path}}"]
       workingDir: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/"
       volumeMounts:
       - name: "workdir-{{inputs.parameters.config-path}}"
