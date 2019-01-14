@@ -1,0 +1,4 @@
+anchoreGlobal:
+  image:
+    tag: dev
+    pullPolicy: Always
