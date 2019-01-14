@@ -11,7 +11,7 @@ spec:
     - name: commit-sha
       value: "abcdefg123456"
   entrypoint: start-tests
-  onExit: delete-anchore-engine 
+  onExit: cleanup
   volumeClaimTemplates:
   - metadata:
       name: workdir-load-test
@@ -203,16 +203,32 @@ spec:
       - name: ANCHORE_CLI_PASS
         value: foobar
 
-  - name: delete-anchore-engine
+  - name: cleanup
     inputs:
         parameters:
         - name: test-dirs
         - name: commit-sha
+    steps:
+    - - name: delete-anchore-engine
+        template: delete-anchore-engine
+        withParam: "{{inputs.parameters.test-dirs}}"
+        arguments:
+          parameters:
+          - name: config-path
+            value: "{{item}}"
+          - name: commit-sha
+            value: "{{inputs.parameters.commit-sha}}"
+        
+  - name: delete-anchore-engine
+    inputs:
+        parameters:
+        - name: config-path
+        - name: commit-sha
     container:
       image: docker.io/bitnami/kubectl:1.9
       command: ["kubectl"]
-      args: ["delete", "-f", "kustomized.yaml", "-n", "{{inputs.parameters.test-dirs}}-{{inputs.parameters.commit-sha}}"]
-      workingDir: "/mnt/vol/{{inputs.parameters.test-dirs}}/anchore-engine/test/e2e/ship_kustomize/overlays/ship/"
+      args: ["delete", "-f", "kustomized.yaml", "-n", "{{inputs.parameters.config-path}}-{{inputs.parameters.commit-sha}}"]
+      workingDir: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/ship_kustomize/overlays/ship/"
       volumeMounts:
-      - name: "workdir-{{inputs.parameters.test-dirs}}"
+      - name: "workdir-{{inputs.parameters.config-path}}"
         mountPath: /mnt/vol
