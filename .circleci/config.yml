@@ -51,14 +51,14 @@ commands:
     - run:
         name: run tests
         command: |
-          tox << parameters.test_path >> | tee report_$(echo "<< parameters.test_path >>" | sed 's|/|-|').log
+          mkdir logs
+          tox << parameters.test_path >> | tee logs/report_$(echo "<< parameters.test_path >>" | sed 's|/|-|').log
     - save_cache:
         paths:
           - ./tox
         key: v1-dependencies-{{ checksum "requirements.txt" }}
     - store_artifacts:
-        path: test-reports.log
-        destination: test-reports.log
+        path: logs/
 
 jobs:
   unit_tests:
@@ -127,7 +127,7 @@ jobs:
     - run:
         name: docker compose
         command: |
-          sed -i 's|anchore/anchore-engine:.*$|anchore/anchore-engine:ci|g' docker-compose.yaml
+          sed -i "s|anchore/anchore-engine:.*$|${IMAGE_NAME}:ci|g" docker-compose.yaml
           docker-compose up -d
           docker-compose ps
           docker-compose logs engine-api
