@@ -3,6 +3,8 @@ kind: Workflow
 metadata:
   generateName: e2e-anchore-engine-
 spec:
+  ttlSecondsAfterFinished: 259200 # delete pods after 3 days
+  activeDeadlineSeconds: 900 # terminate workflow if it runs for longer than 15m
   arguments:
     parameters:
     - name: test-dirs
