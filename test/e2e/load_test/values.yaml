@@ -1,5 +1,6 @@
 anchoreGlobal:
   image:
+    tag: dev
     pullPolicy: Always
   ingress:
     enabled: true
