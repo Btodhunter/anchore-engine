@@ -197,7 +197,6 @@ jobs:
             echo 'Skipping downstream push because pushed image is not anchore-engine:dev'
           fi
 workflows:
-  version: 2
   default_workflow:
     jobs:
     - unit_tests

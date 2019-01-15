@@ -1,5 +1,6 @@
 anchoreGlobal:
   image:
+    repository: btodhunter/anchore-engine
     tag: dev
     pullPolicy: Always
   ingress:
