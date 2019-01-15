@@ -187,9 +187,9 @@ jobs:
         command: |
           find ./test/e2e/* -type d ! -path *ship_kustomize* -printf "%f\n" > tests.txt
           for i in $(cat tests.txt);do TEST_DIRS+=(\"$i\");done
-          for i in $(cat tests.txt); do kubectl create namespace "${i}-${CIRCLE_SHA1:0:8}"; done
+          for i in $(cat tests.txt); do kubectl create namespace "${i}-${CIRCLE_SHA1}"; done
           argo submit --watch test/e2e/argo.yaml -p commit-sha="$CIRCLE_SHA1" -p test-dirs="$(printf '%s, ' [${TEST_DIRS[@]}] | sed 's/, $//')"
-          for i in $(cat tests.txt); do kubectl delete namespace "${i}-${CIRCLE_SHA1:0:8}"; done
+          for i in $(cat tests.txt); do kubectl delete namespace "${i}-${CIRCLE_SHA1}"; done
   
   trigger_downstream:
     machine: true
