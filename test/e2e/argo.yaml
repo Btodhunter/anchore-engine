@@ -9,7 +9,7 @@ spec:
       value: |
         ["load-test", "s3-archive", "swift-archive"]
     - name: commit-sha
-      value: "abcdefg123456"
+      value: "master"
   entrypoint: start-tests
   onExit: cleanup
   volumeClaimTemplates:
@@ -115,7 +115,7 @@ spec:
         path: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine"
         git:
           repo: https://github.com/btodhunter/anchore-engine.git
-          revision: "e2e_testing"
+          revision: "{{inputs.parameters.commit-sha}}"
     container:
       image: docker.io/replicated/ship:0.29.0
       args: ["update", "--helm-values-file", "{{inputs.parameters.config-path}}/values.yaml"]
