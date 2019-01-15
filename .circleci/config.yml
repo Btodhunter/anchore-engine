@@ -179,6 +179,7 @@ jobs:
         command: |
           echo "$GCP_KEY" | base64 --decode >> /tmp/gcp_key.json
           gcloud auth activate-service-account --key-file /tmp/gcp_key.json
+          gcloud config set project "$GCP_PROJECT_ID"
           gcloud container clusters get-credentials standard-cluster-1 --region us-west2-a
     - run:
         name: Run argo job
