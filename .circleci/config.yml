@@ -179,10 +179,13 @@ jobs:
         command: |
           echo "$GCP_KEY" | base64 --decode >> /tmp/gcp_key.json
           gcloud auth activate-service-account --key-file /tmp/gcp_key.json
-          gcloud container get-credentials standard-cluster-1 --region us-west2-a
+          gcloud container clusters get-credentials standard-cluster-1 --region us-west2-a
     - run:
         name: Run argo job
-        command: argo submit --watch test/e2e/argo.yaml -p git-commit="$CIRCLECI_SHA1"
+        command: |
+          find test/e2e -type d ! -name "ship_kustomize" ! -name "." ! -path "./ship_kustomize/*" -execdir echo {} \; > tests.txt
+          for i in $(cat tests.txt);do TEST_DIRS+=(\"$i\");done
+          argo submit --watch test/e2e/argo.yaml -p git-commit="$CIRCLECI_SHA1" -p test-dirs="$(printf "%s" "[${TEST_DIRS// /, }]")"
 
   trigger_downstream:
     machine: true

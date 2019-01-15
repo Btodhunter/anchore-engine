@@ -7,7 +7,7 @@ spec:
     parameters:
     - name: test-dirs
       value: |
-        ["load-test", "s3-archive", "swift-archive"]
+        []
     - name: commit-sha
       value: "master"
   entrypoint: start-tests
