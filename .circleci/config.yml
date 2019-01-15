@@ -87,7 +87,8 @@ jobs:
     working_directory: ~/build
     steps:
     - checkout
-    - setup_remote_docker
+    - setup_remote_docker:
+        docker_layer_caching: true
     - restore_cache:
         keys:
         - v1-{{ .Branch }}
@@ -167,7 +168,7 @@ jobs:
   
   functional_tests:
     docker:
-    - image: 'google/cloud-sdk'
+    - image: 'google/cloud-sdk:latest'
     steps:
     - checkout
     - run:
@@ -184,10 +185,12 @@ jobs:
     - run:
         name: Run argo job
         command: |
-          find test/e2e -type d ! -name "ship_kustomize" ! -name "." ! -path "./ship_kustomize/*" -execdir echo {} \; > tests.txt
+          find ./test/e2e/* -type d ! -path *ship_kustomize* -printf "%f\n" > tests.txt
           for i in $(cat tests.txt);do TEST_DIRS+=(\"$i\");done
-          argo submit --watch test/e2e/argo.yaml -p git-commit="$CIRCLECI_SHA1" -p test-dirs="$(printf "%s" "[${TEST_DIRS// /, }]")"
-
+          for i in $(cat tests.txt); do kubectl create namespace "${i}-${CIRCLE_SHA1:0:8}"; done
+          argo submit --watch test/e2e/argo.yaml -p commit-sha="$CIRCLECI_SHA1" -p test-dirs="$(printf '%s, ' [${TEST_DIRS[@]}] | sed 's/, $//')"
+          for i in $(cat tests.txt); do kubectl delete namespace "${i}-${CIRCLE_SHA1:0:8}"; done
+  
   trigger_downstream:
     machine: true
     steps:

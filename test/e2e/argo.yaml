@@ -158,8 +158,8 @@ spec:
       - name: commit-sha
     container:
       image: docker.io/bitnami/kubectl:1.9
-      command: ["kubectl"]
-      args: ["apply", "-f", "kustomized.yaml", "-n", "{{inputs.parameters.config-path}}-{{inputs.parameters.commit-sha}}"]
+      command: ["/bin/bash"]
+      args: ["-c", 'export COMMIT_SHA={{inputs.parameters.commit-sha}}; kubectl apply -f kustomized.yaml -n {{inputs.parameters.config-path}}-"${COMMIT_SHA:0:8}"']
       workingDir: /mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/ship_kustomize/overlays/ship/
       volumeMounts:
       - name: "workdir-{{inputs.parameters.config-path}}"
@@ -226,8 +226,8 @@ spec:
         - name: commit-sha
     container:
       image: docker.io/bitnami/kubectl:1.9
-      command: ["kubectl"]
-      args: ["delete", "-f", "kustomized.yaml", "-n", "{{inputs.parameters.config-path}}-{{inputs.parameters.commit-sha}}"]
+      command: ["/bin/sh"]
+      args: ["-c", 'export COMMIT_SHA={{inputs.parameters.commit-sha}}; kubectl delete -f kustomized.yaml -n {{inputs.parameters.config-path}}-"${COMMIT_SHA:0:8}"']
       workingDir: "/mnt/vol/{{inputs.parameters.config-path}}/anchore-engine/test/e2e/ship_kustomize/overlays/ship/"
       volumeMounts:
       - name: "workdir-{{inputs.parameters.config-path}}"
