@@ -6,3 +6,4 @@ RUN wget -O /usr/local/bin/kustomize https://github.com/kubernetes-sigs/kustomiz
 RUN curl -sSL https://github.com/replicatedhq/ship/releases/download/v0.29.0/ship_0.29.0_linux_amd64.tar.gz | tar xv && \
 sudo mv ship /usr/local/bin
 
+RUN echo "test"
