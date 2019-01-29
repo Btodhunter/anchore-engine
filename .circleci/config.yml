@@ -208,8 +208,9 @@ jobs:
     - run:
         name: Wait for anchore engine to start
         command: |
-          anchore-cli system wait --feedsready ""
+          anchore-cli system wait
           anchore-cli system status
+          anchore-cli system feeds list
     - run:
         name: Analyze image
         command: anchore-cli image add alpine:latest
