@@ -158,6 +158,27 @@ jobs:
             false
           fi
   
+    scan_image:
+      docker:
+      - image: docker.io/anchore/engine-cli:latest
+        environment:
+          ANCHORE_CLI_USER: admin
+          ANCHORE_CLI_PASS: foobar
+          ANCHORE_CLI_URL: http://anchore-engine:8228/v1
+      - image: docker.io/anchore/anchore-engine:v0.3.2
+        name: anchore-engine
+        environment:
+          ANCHORE_DB_PASSWORD: mysecretpassword
+          ANCHORE_DB_HOST: anchore-db
+      - image: docker.io/anchore/engine-db-preload:v0.3.2
+        name: anchore-db
+        environment:
+          POSTGRES_PASSWORD: mysecretpassword
+      steps:
+      - run:
+        name: Wait for anchore engine to start
+        command: anchore-cli system wait --feedsready ""
+
   # functional_tests:
   #   docker:
   #   - image: 'google/cloud-sdk:latest'
@@ -198,31 +219,32 @@ jobs:
 workflows:
   default_workflow:
     jobs:
-    - unit_tests
-    - integration_tests
-    - build:
-        requires:
-        - unit_tests
-        - integration_tests
-        filters:
-          branches:
-            only:
-            - 'master'
-            - '0.2'
-    - compose_tests:
-        requires:
-        - build
-    - push_dockerhub:
-        requires:
-        - compose_tests
-    - trigger_downstream:
-        requires:
-        - push_dockerhub
+      - scan_image
+    # - unit_tests
+    # - integration_tests
+    # - build:
+    #     requires:
+    #     - unit_tests
+    #     - integration_tests
+    #     filters:
+    #       branches:
+    #         only:
+    #         - 'master'
+    #         - '0.2'
+    # - compose_tests:
+    #     requires:
+    #     - build
+    # - push_dockerhub:
+    #     requires:
+    #     - compose_tests
+    # - trigger_downstream:
+    #     requires:
+    #     - push_dockerhub
     # - functional_tests:
     #     requires:
     #     - push_dockerhub
-    - anchore/image_scan:
-        requires:
-        - push_dockerhub
-        image_name: 'anchore/anchore-engine:dev'
-        timeout: '500'
+    # - anchore/image_scan:
+    #     requires:
+    #     - push_dockerhub
+    #     image_name: 'anchore/anchore-engine:dev'
+    #     timeout: '500'
