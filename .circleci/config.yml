@@ -164,10 +164,40 @@ jobs:
       environment:
         ANCHORE_CLI_USER: admin
         ANCHORE_CLI_PASS: foobar
-        ANCHORE_CLI_URL: http://anchore-engine:8228/v1
+        ANCHORE_CLI_URL: http://anchore-api:8228/v1
     - image: docker.io/anchore/anchore-engine:v0.3.2
-      name: anchore-engine
+      name: anchore-analyzer
+      command: ["anchore-manager", "service", "start", "analyzer"]
       environment:
+        ANCHORE_ENDPOINT_HOSTNAME: anchore-analyzer
+        ANCHORE_DB_PASSWORD: mysecretpassword
+        ANCHORE_DB_HOST: anchore-db
+    - image: docker.io/anchore/anchore-engine:v0.3.2
+      name: anchore-api
+      command: ["anchore-manager", "service", "start", "apiext"]
+      environment:
+        ANCHORE_ENDPOINT_HOSTNAME: anchore-api
+        ANCHORE_DB_PASSWORD: mysecretpassword
+        ANCHORE_DB_HOST: anchore-db
+    - image: docker.io/anchore/anchore-engine:v0.3.2
+      name: anchore-catalog
+      command: ["anchore-manager", "service", "start", "catalog"]
+      environment:
+        ANCHORE_ENDPOINT_HOSTNAME: anchore-catalog
+        ANCHORE_DB_PASSWORD: mysecretpassword
+        ANCHORE_DB_HOST: anchore-db
+    - image: docker.io/anchore/anchore-engine:v0.3.2
+      name: anchore-policy-engine
+      command: ["anchore-manager", "service", "start", "policy_engine"]
+      environment:
+        ANCHORE_ENDPOINT_HOSTNAME: anchore-policy-engine
+        ANCHORE_DB_PASSWORD: mysecretpassword
+        ANCHORE_DB_HOST: anchore-db
+    - image: docker.io/anchore/anchore-engine:v0.3.2
+      name: anchore-simpleq
+      command: ["anchore-manager", "service", "start", "simplequeue"]
+      environment:
+        ANCHORE_ENDPOINT_HOSTNAME: anchore-simpleq
         ANCHORE_DB_PASSWORD: mysecretpassword
         ANCHORE_DB_HOST: anchore-db
     - image: docker.io/anchore/engine-db-preload:v0.3.2
