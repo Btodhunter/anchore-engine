@@ -138,7 +138,7 @@ jobs:
 
   functional_tests:
     docker:
-    - image: anchore/anchore-cli
+    - image: anchore/engine-cli:latest
     steps:
     - checkout
     - aws-s3/copy:
@@ -148,7 +148,7 @@ jobs:
         name: Run tests
         command: |
           cd test/functional
-          ./anchore-engine.test -run ChartDeploysEngine
+          ./anchore-engine.test -test.run ChartDeploysEngine
 
   push_dockerhub:
     docker:
@@ -211,7 +211,7 @@ workflows:
     - functional_tests:
         context: s3-test-infra-readonly
         requires:
-          - build
+        - build
     - push_dockerhub:
         context: dockerhub
         requires:
