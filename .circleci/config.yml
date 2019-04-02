@@ -210,7 +210,7 @@ workflows:
     - unit_tests
     - integration_tests
     - functional_tests:
-        context: s3-test-infra-readonly
+        context: eks-readonly
     - build:
         requires:
         - unit_tests
