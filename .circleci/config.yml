@@ -182,14 +182,13 @@ jobs:
         name: Run tests
         command: |
           cd test/functional
-          mkdir logs
           anchore-engine.test -test.run ChartDeploysEngine -engineImgTag=dev
     - save_cache:
         paths:
           - ./tox
         key: v1-dependencies-{{ checksum "requirements.txt" }}
     - store_artifacts:
-        path: logs/
+        path: tox.log
 
   trigger_downstream:
     machine: true
