@@ -30,7 +30,7 @@ var_2: &attach_workspace
 version: 2.1
 orbs:
   anchore: anchore/anchore-engine@1.2.1
-  aws-s3: circleci/aws-s3@1.0.0
+  aws-s3: circleci/aws-s3@1.0.4
 commands:
   run_tox_tests:
     description: Pass path to tests to be run with tox
@@ -136,20 +136,6 @@ jobs:
           python aetest.py docker.io/alpine:latest anchore-cli
           python aefailtest.py docker.io/alpine:latest anchore-cli
 
-  functional_tests:
-    docker:
-    - image: anchore/engine-cli:latest
-    steps:
-    - checkout
-    - aws-s3/copy:
-        from: 's3://anchore-test-infra/bin/anchore-engine.test'
-        to: test/functional/
-    - run:
-        name: Run tests
-        command: |
-          cd test/functional
-          ./anchore-engine.test -test.run ChartDeploysEngine
-
   push_dockerhub:
     docker:
     - image: docker:stable
@@ -176,6 +162,34 @@ jobs:
           else
             false
           fi
+
+  functional_tests:
+    docker:
+    - image: btodhunter/test-infra:latest
+    steps:
+    - checkout
+    - restore_cache:
+        keys:
+        - v1-dependencies-{{ checksum "requirements.txt" }}
+        # fallback to using the latest cache if no exact match is found
+        - v1-dependencies-
+    - run:
+        name: Setup k8s cluster & helm
+        command: |
+          aws eks --region us-west-2 update-kubeconfig --name anchore-ci-functional-testing
+          helm init --client-only
+    - run:
+        name: Run tests
+        command: |
+          cd test/functional
+          mkdir logs
+          anchore-engine.test -test.run ChartDeploysEngine -test.engineImgTag=dev
+    - save_cache:
+        paths:
+          - ./tox
+        key: v1-dependencies-{{ checksum "requirements.txt" }}
+    - store_artifacts:
+        path: logs/
 
   trigger_downstream:
     machine: true
@@ -208,15 +222,14 @@ workflows:
     - compose_tests:
         requires:
         - build
-    - functional_tests:
-        context: s3-test-infra-readonly
-        requires:
-        - build
     - push_dockerhub:
         context: dockerhub
         requires:
         - compose_tests
-        - functional_tests
+    - functional_tests:
+        context: s3-test-infra-readonly
+        requires:
+        - push_dockerhub
     - trigger_downstream:
         requires:
         - push_dockerhub
