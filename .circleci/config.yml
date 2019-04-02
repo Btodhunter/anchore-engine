@@ -183,7 +183,7 @@ jobs:
         command: |
           cd test/functional
           mkdir logs
-          anchore-engine.test -test.run ChartDeploysEngine -test.engineImgTag=dev
+          anchore-engine.test -test.run ChartDeploysEngine -engineImgTag=dev
     - save_cache:
         paths:
           - ./tox
