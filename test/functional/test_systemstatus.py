@@ -17,7 +17,7 @@ base_url = anchore_url
 base_auth = (anchore_user, anchore_pass)
 
 print("system-status-url: " + base_url)
-print("system-status-auth: " + base_auth)
+print("system-status-auth: " + base_auth[0] + ', ' + base_auth[1])
 
 class SimpleClient(object):
     def __init__(self, username, password, base_url=None):

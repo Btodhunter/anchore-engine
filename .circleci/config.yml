@@ -40,8 +40,9 @@ commands:
     - checkout
     - restore_cache:
         keys:
-        - v1-dependencies-{{ checksum "requirements.txt" }}
+        - v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
         # fallback to using the latest cache if no exact match is found
+        - v1-dependencies-{{ .Branch }}-
         - v1-dependencies-
     - run:
         name: install dependencies
@@ -55,8 +56,8 @@ commands:
           tox << parameters.test_path >> | tee logs/report_$(echo "<< parameters.test_path >>" | sed 's|/|-|').log
     - save_cache:
         paths:
-          - ./tox
-        key: v1-dependencies-{{ checksum "requirements.txt" }}
+          - ~/project/.tox
+        key: v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
     - store_artifacts:
         path: logs/
 
@@ -169,8 +170,9 @@ jobs:
     - checkout
     - restore_cache:
         keys:
-        - v1-dependencies-{{ checksum "requirements.txt" }}
+        - v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
         # fallback to using the latest cache if no exact match is found
+        - v1-dependencies-{{ .Branch }}-
         - v1-dependencies-
     - run:
         name: Setup k8s cluster & helm
@@ -184,8 +186,8 @@ jobs:
           anchore-engine.test -test.run ChartDeploysEngine -engineImgTag=dev
     - save_cache:
         paths:
-          - ./tox
-        key: v1-dependencies-{{ checksum "requirements.txt" }}
+          - ~/project/.tox
+        key: v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
     - store_artifacts:
         path: test/functional/tox.log
 
