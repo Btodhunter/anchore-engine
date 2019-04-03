@@ -16,6 +16,9 @@ anchore_url = os.environ.get('ANCHORE_CLI_URL', 'http://localhost:8228/v1')
 base_url = anchore_url
 base_auth = (anchore_user, anchore_pass)
 
+print("system-status-url: " + base_url)
+print("system-status-auth: " + base_auth)
+
 class SimpleClient(object):
     def __init__(self, username, password, base_url=None):
         self.auth = (username, password)

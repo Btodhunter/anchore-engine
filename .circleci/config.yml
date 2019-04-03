@@ -30,7 +30,6 @@ var_2: &attach_workspace
 version: 2.1
 orbs:
   anchore: anchore/anchore-engine@1.2.1
-  aws-s3: circleci/aws-s3@1.0.4
 commands:
   run_tox_tests:
     description: Pass path to tests to be run with tox
@@ -188,7 +187,7 @@ jobs:
           - ./tox
         key: v1-dependencies-{{ checksum "requirements.txt" }}
     - store_artifacts:
-        path: tox.log
+        path: test/functional/tox.log
 
   trigger_downstream:
     machine: true
