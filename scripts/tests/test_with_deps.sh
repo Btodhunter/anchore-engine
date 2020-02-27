@@ -20,7 +20,7 @@ if [[ -e ${test_dir}/setup_deps.sh ]]; then
 	source ./setup_deps.sh
 	popd
 else
-	echo No setup_depts.sh script found to run, skipping
+	echo "No setup_depts.sh script found to run, skipping"
 fi
 
 echo "Running the tests"

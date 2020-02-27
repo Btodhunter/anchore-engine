@@ -1,194 +1,136 @@
-# This Makefile requires make v3.8.2 or newer to function properly due to the .ONESHELL directive. (for macos - `brew install gmake` then add `alias make=gmake` to your .bash_profile)
 # Project Specific configuration
-CI ?= false
+DEV_IMAGE_REPO ?= anchore/anchore-engine-dev
+PROD_IMAGE_REPO ?= ''
+RELEASE_BRANCHES ?= ''
+LATEST_RELEASE_BRANCH ?= ''
+ANCHORE_CLI_VERSION ?= ''
+# Set VERBOSE=1 or VERBOSE=true to display stdout. Set VERBOSE=2 for command details & stdout
+VERBOSE ?= 'false'
+# Set CI=true when running in CircleCI. This setting will setup the proper env for CircleCI
+# All 'production' image push jobs to Dockerhub are gated on CI=true
+CI ?= 'false'
+# Set SKIP_CLEANUP=true to prevent all error/exit cleanup scripts from running
+SKIP_CLEANUP ?= 'false'
 # Use $CIRCLE_SHA or use SHA from HEAD
-COMMIT ?= $(shell echo $${CIRCLE_SHA:=$$(git rev-parse HEAD)})
-# Use $CIRCLE_BRANCH or use current HEAD branch
+COMMIT_SHA ?= $(shell echo $${CIRCLE_SHA:=$$(git rev-parse HEAD)})
+# Use $CIRCLE_PROJECT_REPONAME or the git project top level dir name
 GIT_REPO ?= $(shell echo $${CIRCLE_PROJECT_REPONAME:=$$(basename `git rev-parse --show-toplevel`)})
+# Use $CIRCLE_BRANCH or use current HEAD branch
 GIT_BRANCH ?= $(shell echo $${CIRCLE_BRANCH:=$$(git rev-parse --abbrev-ref HEAD)})
-CLI_COMMIT ?= $(shell (git ls-remote git@github.com:anchore/anchore-cli "refs/heads/$(GIT_BRANCH)" | awk '{ print $$1 }'))
-IMAGE_TAG = $(COMMIT)
-IMAGE_REPOSITORY = anchore/anchore-engine-dev
-IMAGE_NAME = $(IMAGE_REPOSITORY):$(IMAGE_TAG)
-RELEASE_BRANCHES = '(0.2|0.3|0.4|0.5|0.6)'
-PYTHON_VERSION = 3.6.6
+# Get commit SHA of the latest anchore-cli tag
+CLI_COMMIT_SHA ?= $(shell echo $$(git ls-remote git@github.com:anchore/anchore-cli.git --sort="version:refname" --tags v\* | tail -n1 | awk '{print $$1}'))
+
+# testing environment configuration
+TEST_IMAGE_NAME = $(GIT_REPO):dev
+KIND_VERSION = v0.7.0
+KIND_NODE_IMAGE_TAG = v1.15.7@sha256:e2df133f80ef633c53c0200114fce2ed5e1f6947477dbc83261a6a921169488d
+KUBECTL_VERSION = v1.15.0
+HELM_VERSION = v3.1.1
 
 # Make environment configuration
 ENV = /usr/bin/env
-VENV_NAME = venv
-VENV_ACTIVATE = . $(VENV_NAME)/bin/activate
+VENV_NAME = .venv
+VENV_ACTIVATE = $(VENV_NAME)/bin/activate
 PYTHON = $(VENV_NAME)/bin/python3
-SHELL = /bin/bash
-.SHELLFLAGS = -o pipefail -ec # run commands in a -o pipefail -ec flag
+PYTHON_VERSION = 3.6.6
 .DEFAULT_GOAL := help # Running `Make` will run the help target
-.ONESHELL: # Run every line in recipes in same shell
 .NOTPARALLEL: # wait for targets to finish
 .EXPORT_ALL_VARIABLES: # send all vars to shell
 
-.PHONY: install ## install anchore-engine to venv
-install: venv setup.py requirements.txt
-	${PYTHON} -m pip install --editable .
+# Setup shell colors for print/echo statements -- ${OK}=green, ${WARN}=yellow, ${INFO}=cyan, ${ERR}=red, ${NC}=normal
+OK=\033[0;32m
+WARN=\033[0;33m
+INFO=\033[0;36m
+ERR=\033[0;31m
+NC=\033[0m
 
+# Define available make commands - use ## on target names to create 'help' text
 .PHONY: build
 build: Dockerfile ## build image
-	docker build --build-arg ANCHORE_COMMIT=$(COMMIT) --build-arg CLI_COMMIT=$(CLI_COMMIT) -t $(IMAGE_NAME) -f ./Dockerfile .
-	if [[ $(CI) == true ]]; then
-		rm -rf /home/circleci/workspace/caches/
-		mkdir -p /home/circleci/workspace/caches/
-		docker save -o "/home/circleci/workspace/caches/$(GIT_REPO)-$(COMMIT).tar" $(IMAGE_NAME)
-	fi
-
-.PHONY: compose-up
-compose-up: $(VENV_NAME)/docker-compose.yaml ## run container with docker-compose.yaml file
-$(VENV_NAME)/docker-compose.yaml: docker-compose.yaml deps
-	$(VENV_ACTIVATE)
-	mkdir -p $(VENV_NAME)/compose/$(COMMIT)
-	cp docker-compose.yaml $(VENV_NAME)/compose/$(COMMIT)/docker-compose.yaml
-	sed -i "s|anchore/anchore-engine:.*$$|$(IMAGE_NAME)|g" $(VENV_NAME)/compose/$(COMMIT)/docker-compose.yaml
-	docker-compose -f $(VENV_NAME)/compose/$(COMMIT)/docker-compose.yaml up -d
-	printf '\n%s\n' "To stop anchore-engine use: make compose-down"
-
-.PHONY: compose-down
-compose-down:
-	$(VENV_ACTIVATE)
-	docker-compose -f $(VENV_NAME)/compose/$(COMMIT)/docker-compose.yaml down
-	rm -rf $(VENV_NAME)/compose/$(COMMIT)
+	@scripts/ci/run_command "Building image" build
+	@printf "%s\n\tSuccessfully built image: $(INFO)$(TEST_IMAGE_NAME)$(NC)\n\n"
 
 .PHONY: push
 push: ## push image to dockerhub
-	if [[ $(CI) == true ]]; then
-		docker load -i "/home/circleci/workspace/caches/$(GIT_REPO)-$(COMMIT).tar"
-		if [[ $(GIT_BRANCH) == 'master' ]]; then
-			echo "tagging & pushing image -- docker.io/anchore/anchore-engine:dev"
-			docker tag $(IMAGE_NAME) docker.io/anchore/anchore-engine:dev
-			docker push docker.io/anchore/anchore-engine:dev
-		elif [[ $(GIT_BRANCH) =~ $(RELEASE_BRANCHES) ]]; then
-			echo "tagging & pushing image -- docker.io/anchore/anchore-engine:$(GIT_BRANCH)-dev"
-			docker tag $(IMAGE_NAME) docker.io/anchore/anchore-engine:$(GIT_BRANCH)-dev
-			docker push docker.io/anchore/anchore-engine:$(GIT_BRANCH)-dev
-		fi
-	fi
-	echo "Pushing $(IMAGE_NAME) && $(IMAGE_REPOSITORY):latest"
-	docker tag $(IMAGE_NAME) $(IMAGE_REPOSITORY):latest
-	docker push $(IMAGE_REPOSITORY):latest
-	docker push $(IMAGE_NAME)
+	@VERBOSE=$${VERBOSE:=1} scripts/ci/run_command "Pushing $(IMAGE_NAME) to Dockerhub" push_image
+
+.PHONY: venv
+venv: $(VENV_ACTIVATE) ## setup virtual environment
+$(VENV_ACTIVATE):
+	@scripts/ci/run_command "Creating virtualenv at $(VENV_NAME)" setup_venv
+	@touch $@
+
+.PHONY: install
+install: venv setup.py requirements.txt ## install to venv in dev mode
+	@scripts/ci/run_command "Installing $(GIT_REPO) to $(VENV_NAME)" install_dev
 
 .PHONY: lint
 lint: venv ## lint code with pylint
-	$(VENV_ACTIVATE)
-	hash pylint || pip install --upgrade pylint
-	pylint anchore_engine
-	pylint anchore_manager
+	@scripts/ci/run_command "Linting $(GIT_REPO)" lint
 
 .PHONY: deps
 deps: venv ## install testing dependencies
-	@$(VENV_ACTIVATE)
-	mkdir -p .tox
-	hash tox || pip install tox
-	hash docker-compose || pip install docker-compose
+	@scripts/ci/run_command "Installing dependencies to $(VENV_NAME)" install_test_deps
 
-.PHONY: test-all
+.PHONY: compose-up
+compose-up: deps scripts/ci/docker-compose-ci.yaml ## run image with docker compose
+	@SKIP_CLEANUP=true scripts/ci/run_command "Starting Docker Compose" compose_up
+	@printf "%s\n$(INFO)To stop running use:\n\t\t$(WARN)make compose-down${NC}\n"
+
+.PHONY: compose-down
+compose-down: deps scripts/ci/docker-compose-ci.yaml ## Bring down docker-compose
+	@scripts/ci/run_command "Stopping Docker Compose" compose_down
+
+.PHONY: test
 test-all: test-unit test-integration test-functional test-compose ## run all tests - unit, integration, functional, e2e
 
 .PHONY: test-unit
 test-unit: deps ## run unit tests with tox
-	$(VENV_ACTIVATE)
-	tox test/unit | tee .tox/tox.log
+	@scripts/ci/run_command "Run unit tests with tox" unit_tests
 
 .PHONY: test-integration
 test-integration: deps ## run integration tests with tox
-	$(VENV_ACTIVATE)
-	if [[ $(CI) == true ]]; then
-		tox test/integration | tee .tox/tox.log
-	else
-		./scripts/tests/test_with_deps.sh test/integration/
-	fi
+	@scripts/ci/run_command "Run integration tests with tox" integration_tests
 
 .PHONY: test-functional
-test-functional: deps ## run functional tests with tox
-	$(VENV_ACTIVATE)
-	tox test/functional | tee .tox/tox.log
+test-functional: deps compose-up ## run functional tests with tox
+	@scripts/ci/run_command "Run functional tests with tox" functional_tests
 
-.PHONY: test-compose
-test-compose: compose-up ## run compose tests with docker-compose
-	$(VENV_ACTIVATE)
-	hash anchore-cli || pip install anchorecli
-	if [[ $(CI) == true ]]; then
-		# forward port 8227 from remote-docker to runner
-		ssh -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
-	fi
-	anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system wait --feedsready ''
-	docker-compose logs engine-api
-	anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system status
-	python scripts/tests/aetest.py docker.io/alpine:latest
-	python scripts/tests/aefailtest.py docker.io/alpine:latest
-	if [[ $(CI) == true ]]; then
-		# close forwarded port
-		ssh -S anchore -O exit remote-docker
-	fi
-	make compose-down
+.PHONY: test-e2e
+test-e2e: deps ## run e2e tests with KIND & Helm
+	@scripts/ci/run_command "Install e2e test dependencies" e2e_test_install_deps
+	@scripts/ci/run_command "Setup e2e test infra" e2e_test_setup
+	@scripts/ci/run_command "Run e2e tests with KIND/Helm" e2e_tests	
 
 .PHONY: clean-all
-clean-all: clean clean-tests clean-pyc clean-container ## clean all build/test artifacts
+clean-all: clean clean-tests clean-container ## clean all build/test artifacts
 
 .PHONY: clean
-clean: ## delete all build directories & virtualenv
-	rm -rf venv \
-		*.egg-info \
-		dist \
-		build 
+clean: ## delete all build directories, pycache & virtualenv
+	@scripts/ci/run_command "Clean up python environment" clean_python_env
 
 .PHONY: clean-tests
-clean-tests: ## delete test dirs
-	rm -rf .tox
-	rm -f tox.log
-	rm -rf .pytest_cache
-
-.PHONY: clean-pyc
-clean-pyc: ## deletes all .pyc files
-	find . -name '*.pyc' -exec rm -f {} \;
+clean-tests: ## delete temporary test directories
+	@scripts/ci/run_command "Clean up temporary testing files" clean_tests
 
 .PHONY: clean-container
 clean-container: ## delete built image
-	docker rmi $(IMAGE_NAME)
+	@scripts/ci/run_command "Delete the $(TEST_IMAGE_NAME) container" clean_container
 
-.PHONY: venv
-venv: $(VENV_NAME)/bin/activate ## setup virtual environment
-$(VENV_NAME)/bin/activate:
-	if [[ $(CI) == true ]]; then
-		hash pip || pip install pip
-		hash virtualenv || pip install virtualenv
-	else
-		hash pip || (echo 'ensure python-pip is installed before attempting to setup virtualenv' && exit 1)
-		hash virtualenv || (echo 'ensure virtualenv is installed before attempting to setup virtualenv - `pip install virtualenv`' && exit 1)
-	fi
-	test -f $(VENV_NAME)/bin/python3 || virtualenv -p python3 $(VENV_NAME)
-	touch $@
+.PHONY: dev
+dev: setup-pyenv deps install ## Setup dev environment from scratch
+	@printf "%s\n\t$(INFO)Enable virtualenv by running:\n\t\t$(WARN)source $(VENV_ACTIVATE)$(NC)\n\n"
 
-.PHONY: setup-dev
-setup-dev: | .python-version ## install pyenv, python and set local .python_version
-	@echo
-	echo 'To enable pyenv in your current shell run: `exec $$SHELL`'
-	echo 'Then continue the development environment setup with: `make deps`'
+.PHONY: setup-pyenv
+setup-pyenv: | .python-version ## install pyenv, python and set local .python_version
 .python-version: | $(HOME)/.pyenv/versions/$(PYTHON_VERSION)/bin/python
-	$(HOME)/.pyenv/bin/pyenv local $(PYTHON_VERSION)
+	@scripts/ci/run_command "Pyenv - set local Python to $(PYTHON_VERSION)" set_pyenv_local_version
 $(HOME)/.pyenv/versions/$(PYTHON_VERSION)/bin/python: | $(HOME)/.pyenv
-	$(HOME)/.pyenv/bin/pyenv install $(PYTHON_VERSION)
+	@scripts/ci/run_command "Pyenv - installing python $(PYTHON_VERSION)" install_python_version
 $(HOME)/.pyenv:
-	curl https://pyenv.run | $(SHELL)
-	echo 'export PATH="$(HOME)/.pyenv/bin:$$PATH"' >> $(HOME)/.bashrc
-	echo 'eval "$$(pyenv init -)"' >> $(HOME)/.bashrc
-	echo 'eval "$$(pyenv virtualenv-init -)"' >> $(HOME)/.bashrc
-	chmod +x $(HOME)/.bashrc
-	echo
-	echo '# added pyenv config to $(HOME)/.bashrc'
-	if [[ -f $(HOME)/.zshrc ]]; then
-		echo 'if [ -f ~/.bashrc ]; then source ~/.bashrc; fi' >> $(HOME)/.zshrc
-	elif [[ -f $(HOME)/.bash_profile ]]; then
-		echo 'if [ -f ~/.bashrc ]; then source ~/.bashrc; fi' >> $(HOME)/.bash_profile
-	fi
-	echo
+	@scripts/ci/run_command "Installing pyenv" install_pyenv
+	@printf "%s\n\t$(INFO)To enable pyenv in your current shell run:\n\t\t$(WARN)exec $(SHELL)$(NC)\n"
 
 .PHONY: help
 help: ## show help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "$(INFO)%-30s$(NC) %s\n", $$1, $$2}'
