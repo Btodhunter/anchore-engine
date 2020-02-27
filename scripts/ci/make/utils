@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+function clean_python_env() {
+    rm -rf ${VENV_NAME} \
+        *.egg-info \
+        dist \
+        build
+    find . -name '*.pyc' -o -name '__pycache__' -exec rm -rf {} \;
+}
+
+function clean_tests() {
+    rm -rf .tox
+    rm -f tox.log
+    rm -rf .pytest_cache
+}
+
+function clean_container() {
+    docker rmi "${GIT_REPO}:dev"
+}
+
+function cleanup() {
+    rm -rf ${VENV_NAME}/tmp
+}
+
+function compose_down() {
+    if [[ ${SKIP_CLEANUP} == true ]]; then
+        docker-compose -f scripts/ci/docker-compose-ci.yaml down 2>&1
+    else
+        docker-compose -f scripts/ci/docker-compose-ci.yaml down -v 2>&1
+    fi
+}
+
+function compose_up() {
+    docker-compose -f scripts/ci/docker-compose-ci.yaml up -d 2>&1
+}
+
+function e2e_test_install_deps() {
+    echo 'installing kind...'
+    curl -sSLo ${VENV_NAME}/bin/kind https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64
+    chmod +x ${VENV_NAME}/bin/kind
+    echo 'installing helm...'
+    curl -sSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar xzf - -C ${VENV_NAME}/bin --strip-components=1 linux-amd64/helm
+    chmod +x ${VENV_NAME}/bin/helm
+    echo 'installing kubectl...'
+    curl -sSLo ${VENV_NAME}/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl
+    chmod +x ${VENV_NAME}/bin/kubectl
+    pip install anchorecli
+}
+
+function e2e_test_setup() {
+    kind create cluster --name e2e-testing --config test/e2e/kind-config.yaml --image "kindest/node:${KIND_NODE_IMAGE_TAG}" --wait 60s
+    kubectl create secret docker-registry anchore-enterprise-pullcreds --docker-server=docker.io --docker-username="${DOCKER_USER}" --docker-password="${DOCKER_PASS}" --docker-email=anchoreci@anchore.com
+    kubectl patch serviceaccount default -p '{"imagePullSecrets":[{"name": "anchore-enterprise-pullcreds"}]}' --type=merge
+    helm repo add stable https://kubernetes-charts.storage.googleapis.com
+}
+
+function install_dev() {
+    pip install --editable .
+}
+
+function install_pyenv() {
+    curl https://pyenv.run | "${SHELL}"
+    echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> ${HOME}/.bashrc
+    echo 'eval "$(pyenv init -)"' >> ${HOME}/.bashrc
+    echo 'eval "$(pyenv virtualenv-init -)"' >> ${HOME}/.bashrc
+    chmod +x ${HOME}/.bashrc
+    printf "%s\t\n${INFO}added pyenv config to ${HOME}/.bashrc${NC}\n"
+    if [[ -f ${HOME}/.zshrc ]]; then
+        echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> ${HOME}/.zshrc
+    elif [[ -f ${HOME}/.bash_profile ]]; then
+        echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> ${HOME}/.bash_profile
+    fi
+}
+
+function install_python_version() {
+    ${HOME}/.pyenv/bin/pyenv install "${PYTHON_VERSION}"
+}
+
+function set_pyenv_local_version() {
+    ${HOME}/.pyenv/bin/pyenv local "${PYTHON_VERSION}"
+}
+
+function setup_venv() {
+    if [[ ${CI} == true ]]; then
+        hash pip || pip install pip
+        hash virtualenv || pip install virtualenv
+    else
+        hash pip || (echo 'ensure python-pip is installed before attempting to setup virtualenv' && exit 1)
+        hash virtualenv || (echo 'ensure virtualenv is installed before attempting to setup virtualenv - `pip install virtualenv`' && exit 1)
+    fi
+    test -f "${PYTHON}" || virtualenv -p python3 "${VENV_NAME}"
+}
