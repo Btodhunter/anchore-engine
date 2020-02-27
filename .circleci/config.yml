@@ -1,45 +1,85 @@
 # CircleCI 2.1 configuration file
 # Check https://circleci.com/docs/2.0/configuration-reference/ for more details
 #
-# The following environment variables must be set in the circleci project UI
-# - $DOCKER_USER -> dockerhub user with permissions to repo
-# - $DOCKER_PASS -> password for dockerhub user
+# Note: YAML anchors allow an object to be re-used, reducing duplication.
+# The ampersand declares an alias for an object, then later the `<<: *name`
+# syntax dereferences it.
 #
+# Define YAML anchors
+.global_environment_vars: &global_environment_vars
+  DEV_IMAGE_REPO: 'btodhunter/anchore-engine-dev'
+  PROD_IMAGE_REPO: 'btodhunter/anchore-engine-dev'
+  RELEASE_BRANCHES: '0.2 0.3 0.4 0.5 0.6'
+  LATEST_RELEASE_BRANCH: '0.6'
+  VERBOSE: '1'
+
+.attach_workspace: &attach_workspace
+  attach_workspace:
+    at: /home/circleci/workspace/
+
+.load_docker_image: &load_docker_image
+  run:
+    name: Load Docker image layer cache
+    command: |
+      docker load -i "/home/circleci/workspace/caches/${CIRCLE_SHA1}.tar" || true
+
+.filter_rc_tags: &filter_rc_tags
+  branches:
+    ignore: /.*/
+  tags:
+    only: /^v[0-9]+(\.[0-9]+)*-rc[0-9]+$/
+
+.filter_release_branch: &filter_release_branch
+  branches:
+    only: 
+      - /^[0-9]+(\.[0-9]+)$/
+      - master
+      - /^ci-.*/
+
+.filter_semver_tags: &filter_semver_tags
+  branches:
+    ignore: /.*/
+  tags:
+    only: /^v[0-9]+(\.[0-9]+)*$/
+
 # Start circleci configuration
 version: 2.1
 orbs:
-  anchore: anchore/anchore-engine@1.6.4
+  anchore: anchore/anchore-engine@1.6.5
 commands:
-  run_tox_tests:
-    description: Pass path to tests to be run with tox
+  run_tests:
+    description: |
+      Uses the make command to run tests 
+      Saves the tox cache & stores log output as artifacts
     parameters:
-      test_type:
+      make_command:
         type: string
     steps:
-    - checkout
-    - restore_cache:
-        keys:
-        - v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
-    - run:
-        name: run tests
-        command: make test-<< parameters.test_type >>
-    - save_cache:
-        paths:
-          - ~/project/.tox
-        key: v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
-    - store_artifacts:
-        path: .tox/tox.log
-    - store_test_results:
-        path: .tox/results
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
+      - run:
+          name: run tests
+          command: << parameters.make_command >>
+      - save_cache:
+          paths:
+            - ~/project/.tox
+          key: v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
+      - store_artifacts:
+          path: .tox/tox.log
+      - store_test_results:
+          path: .tox/results
 
 jobs:
   unit_tests:
     docker:
-    - image: circleci/python:3.6
+      - image: circleci/python:3.6
+    environment: *global_environment_vars
     steps:
-    - run_tox_tests:
-        test_type: "unit"
-  
+      - run_tests:
+          make_command: "make test-unit"
+
   integration_tests:
     docker:
       - image: circleci/python:3.6
@@ -52,6 +92,7 @@ jobs:
         environment:
           POSTGRES_PASSWORD: "postgres"
     environment:
+      <<: *global_environment_vars
       ANCHORE_TEST_S3_ACCESS_KEY: "9EB92C7W61YPFQ6QLDOU"
       ANCHORE_TEST_S3_SECRET_KEY: "TuHo2UbBx+amD3YiCeidy+R3q82MPTPiyd+dlW+s"
       ANCHORE_TEST_S3_URL: "http://localhost:9000"
@@ -67,95 +108,78 @@ jobs:
       ANCHORE_TEST_DB_PASS: "postgres"
       ANCHORE_TEST_DATA_ENV_DIR: "test/data/test_data_env"
     steps:
-      - setup_remote_docker:
-          docker_layer_caching: true
-      - run_tox_tests:
-          test_type: "integration"
+      - setup_remote_docker
+      - run_tests:
+          make_command: "make test-integration"
 
   build:
     docker:
-    - image: circleci/python:3.6
+      - image: circleci/python:3.6
+    environment: *global_environment_vars
     steps:
-    - checkout
-    - setup_remote_docker:
-        docker_layer_caching: true
-    - run:
-        name: build Docker image
-        command: make build
-    - run:
-        name: Run compose tests
-        command: make test-compose
-    - persist_to_workspace:
-        root: /home/circleci/workspace/
-        paths:
-        - caches/*
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - checkout
+      - run:
+          name: Build Docker image
+          command: make build
+      - run:
+          name: Run compose tests
+          command: |
+            # forward port 8228 from remote-docker to runner
+            ssh -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
+            make test-compose
+      - run:
+          name: Save image to workspace
+          command: |
+            rm -rf /home/circleci/workspace/caches/
+            mkdir -p /home/circleci/workspace/caches/
+            docker save -o "/home/circleci/workspace/caches/${CIRCLE_SHA1}.tar" anchore-engine:test
+      - persist_to_workspace:
+          root: /home/circleci/workspace/
+          paths:
+            - caches/*
 
   push_dockerhub:
     docker:
-    - image: circleci/python:3.6
+      - image: circleci/python:3.6
+    environment: *global_environment_vars
     steps:
-    - attach_workspace:
-        at: /home/circleci/workspace/
-    - setup_remote_docker
-    - checkout
-    - run:
-        name: Push to Dockerhub
-        command: |
-          echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-          make push
+      - setup_remote_docker
+      - checkout
+      - <<: *attach_workspace
+      - <<: *load_docker_image
+      - run:
+          name: Push to Dockerhub
+          command: |
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            make push
 
-  trigger_downstream:
-    docker:
-      - image: anchore/test-infra:latest
-        auth:
-          username: $DOCKER_USER
-          password: $DOCKER_PASS
-    steps:
-    - run:
-        name: Trigger release candidate builds
-        command: |
-          source ci_utils.sh
-          trigger_artifact_build anchore-engine
+
 
 workflows:
   default_workflow:
     jobs:
-    - unit_tests
-    - integration_tests
-    - build:
-        context: dockerhub
-        filters:
-          branches:
-            only:
-            - 'master'
-            - '0.6'
-            - '0.5'
-            - '0.4'
-            - '0.3'
-            - '0.2'
-    - push_dockerhub:
-        context: dockerhub
-        filters:
-          branches:
-            only:
-            - 'master'
-            - '0.6'
-            - '0.5'
-            - '0.4'
-            - '0.3'
-            - '0.2'
-        requires:
-        - build
-        - unit_tests
-        - integration_tests
-    - trigger_downstream:
-        context: release_candidates
-        requires:
-        - push_dockerhub
-    - anchore/image_scan:
-        context: dockerhub
-        requires:
-        - push_dockerhub
-        image_name: 'anchore/anchore-engine-dev:${CIRCLE_SHA1}'
-        private_registry: true
-        timeout: '2000'
+      - unit_tests
+      - integration_tests
+      - build:
+          context: dockerhub
+          filters: *filter_release_branch
+      - push_dockerhub:
+          context: dockerhub
+          filters: *filter_release_branch
+          requires:
+            - build
+            - unit_tests
+            - integration_tests
+      - trigger_downstream:
+          context: release_candidates
+          requires:
+            - push_dockerhub
+      - anchore/image_scan:
+          context: dockerhub
+          requires:
+            - push_dockerhub
+          image_name: 'anchore/anchore-engine-dev:${CIRCLE_SHA1}'
+          private_registry: true
+          timeout: '2000'
