@@ -3,34 +3,33 @@
 # Fail on any errors, including in pipelines
 set -eo pipefail
 
-function display_usage() {
+display_usage() {
     printf "%s\n\t${WARN}usage:\t$0 <function_name> <display_message>${NC}\n\n"
 }
 
-# The trap_exit function that runs whenever the script exits on error
-function trap_command() {
+# The trap_command function runs whenever the script exits
+trap_command() {
     ret="$?"
     set +eo pipefail
+    if [[ ! "${SKIP_CLEANUP}" == true ]]; then
+        if [[ ! -n "${VERBOSE}" ]]; then
+            cleanup &> /dev/null
+        else
+            cleanup
+        fi
+    fi
     # Test exit code and print status
     if [[ "${ret}" -eq 0 ]]; then
         printf "%s${MESSAGE}\t[ ${OK} OK ${NC} ]\n" | expand  -t 50
     else
         printf "%s${MESSAGE}\t[ ${ERR} FAILED ${NC} ]\n" | expand  -t 50
     fi
-    if [[ ! "${SKIP_CLEANUP}" == true ]]; then
-        if [[ "${VERBOSE}" =~ (1|2|true) ]]; then
-            cleanup
-        else
-            cleanup &> /dev/null
-        fi
-    fi
     exit "${ret}"
 }
 
-function main() {
-    MESSAGE="$1"
-    # drop first argument and set all the following args to the COMMAND var
-    COMMAND="${@:2}"
+main() {
+    COMMAND="$1"
+    MESSAGE="$2"
 
     # load libraries
     for f in "$(cd "$(dirname ${BASH_SOURCE[0]})" && pwd)"/make/*; do
@@ -48,10 +47,13 @@ function main() {
     # Check is the COMMAND var is a valid function or executable script
     elif declare -f "${COMMAND}" &> /dev/null || [[ -x "$COMMAND" ]]; then
         # Activate virtualenv if it exists
-        if [[ -f ${VENV_ACTIVATE} ]]; then
+        if [[ -f "${VENV_ACTIVATE}" ]]; then
             . "${VENV_ACTIVATE}"
         fi
+
         printf "%s${MESSAGE}\t[ ${WARN} Processing ${NC} ]\n" | expand  -t 50
+
+        # Check VERBOSE env var and run command with proper verbosity
         if [[ "${VERBOSE}" == 3 ]]; then
             set -x
             "${COMMAND}"
@@ -63,7 +65,7 @@ function main() {
         elif [[ "${VERBOSE}" =~ (true|TRUE|y|Y|1) ]]; then
             "${COMMAND}"
         else
-            "${COMMAND}" 2>&1  > /dev/null
+            "${COMMAND}" > /dev/null 2>&1
         fi
     else
         printf "%s\t${ERR}ERROR - ${COMMAND} is not a valid function or script name ${NC}\n\n" >&2

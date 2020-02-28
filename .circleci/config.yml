@@ -7,11 +7,11 @@
 #
 # Define YAML anchors
 .global_environment_vars: &global_environment_vars
-  DEV_IMAGE_REPO: 'btodhunter/anchore-engine-dev'
-  PROD_IMAGE_REPO: 'btodhunter/anchore-engine-dev'
-  RELEASE_BRANCHES: '0.2 0.3 0.4 0.5 0.6'
-  LATEST_RELEASE_BRANCH: '0.6'
-  VERBOSE: '1'
+  DEV_IMAGE_REPO: "btodhunter/anchore-engine-dev"
+  PROD_IMAGE_REPO: "btodhunter/anchore-engine-dev"
+  RELEASE_BRANCHES: "0.2 0.3 0.4 0.5 0.6"
+  LATEST_RELEASE_BRANCH: "0.6"
+  VERBOSE: "2"
 
 .attach_workspace: &attach_workspace
   attach_workspace:
@@ -49,10 +49,10 @@ orbs:
 commands:
   run_tests:
     description: |
-      Uses the make command to run tests 
+      Uses make to run tests 
       Saves the tox cache & stores log output as artifacts
     parameters:
-      make_command:
+      test_type:
         type: string
     steps:
       - checkout
@@ -61,7 +61,7 @@ commands:
             - v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
       - run:
           name: run tests
-          command: << parameters.make_command >>
+          command: make test-<< parameters.test_type >>
       - save_cache:
           paths:
             - ~/project/.tox
@@ -78,7 +78,7 @@ jobs:
     environment: *global_environment_vars
     steps:
       - run_tests:
-          make_command: "make test-unit"
+          test_type: "unit"
 
   integration_tests:
     docker:
@@ -110,7 +110,7 @@ jobs:
     steps:
       - setup_remote_docker
       - run_tests:
-          make_command: "make test-integration"
+          test_type: "integration"
 
   build:
     docker:
@@ -140,7 +140,16 @@ jobs:
           paths:
             - caches/*
 
-  push_dockerhub:
+  functional_tests:
+    machine: true
+    environment: *global_environment_vars
+    steps:
+      - <<: *attach_workspace
+      - <<: *load_docker_image
+      - run_tests:
+          test_type: "functional"
+
+  push_dev_image:
     docker:
       - image: circleci/python:3.6
     environment: *global_environment_vars
@@ -155,7 +164,17 @@ jobs:
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
             make push
 
-
+  e2e_tests:
+    machine: true
+    environment: *global_environment_vars
+    steps:
+      - <<: *attach_workspace
+      - <<: *load_docker_image
+      - run:
+          name: Run e2e tests
+          command: |
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            make test-e2e
 
 workflows:
   default_workflow:
@@ -163,23 +182,42 @@ workflows:
       - unit_tests
       - integration_tests
       - build:
-          context: dockerhub
-          filters: *filter_release_branch
-      - push_dockerhub:
-          context: dockerhub
-          filters: *filter_release_branch
+          context: aws-prod
+      - functional_tests:
           requires:
             - build
+      - push_dev_image:
+          context: dockerhub
+          filters: *filter_release_branch
+          requires:
+            - functional_tests
             - unit_tests
             - integration_tests
-      - trigger_downstream:
-          context: release_candidates
+      - e2e_tests:
+          context: e2e-testing
+          filters: *filter_release_branch
           requires:
-            - push_dockerhub
+            - push_dev_image
+      - push_rc_image:
+          context: dockerhub
+          filters: *filter_rc_tags
+          requires:
+            - e2e_tests
       - anchore/image_scan:
           context: dockerhub
+          filters: *filter_rc_tags
           requires:
-            - push_dockerhub
-          image_name: 'anchore/anchore-engine-dev:${CIRCLE_SHA1}'
+            - push_rc_image
+          image_name: 'anchore/enterprise-dev:${CIRCLE_TAG}'
           private_registry: true
           timeout: '2000'
+      - hold_for_approval:
+          type: approval
+          filters: *filter_semver_tags
+          requires:
+            - e2e_tests
+      - push_prod_image:
+          context: dockerhub-prod
+          filters: *filter_semver_tags
+          requires:
+            - hold_for_approval
