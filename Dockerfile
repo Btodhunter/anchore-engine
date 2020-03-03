@@ -5,42 +5,50 @@ FROM registry.access.redhat.com/ubi8/ubi:8.1 as anchore-engine-builder
 ARG CLI_COMMIT
 
 ENV LANG=en_US.UTF-8 LC_ALL=C.UTF-8
-
 ENV GOPATH=/go
 ENV SKOPEO_VERSION=v0.1.41
 
 RUN set -ex && \
-    mkdir -p /build_output /build_output/deps /build_output/configs /build_output/wheels
+    mkdir -p \
+        /build_output \
+        /build_output/deps \
+        /build_output/configs \
+        /build_output/wheels \
+        ${GOPATH}
 
+# stage RPM dependency binaries
 RUN set -ex && \
     echo "installing OS dependencies" && \
     yum update -y && \
-    yum install -y gcc make python36 git python3-wheel python36-devel go && \
-    yum clean all
-
-# stage RPM dependency binaries
-RUN yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
+    yum install -y \
+        gcc \
+        git \
+        go \
+        make \
+        python36 \
+        python36-devel \
+        python3-wheel && \
+    yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && \
     yum install -y --downloadonly --downloaddir=/build_output/deps/ dpkg && \
     yum clean all
 
 RUN set -ex && \
-    mkdir -p ${GOPATH} && \
     echo "installing Skopeo" && \
-    git clone --branch "$SKOPEO_VERSION" https://github.com/containers/skopeo ${GOPATH}/src/github.com/containers/skopeo && \
+    git clone --branch "${SKOPEO_VERSION}" https://github.com/containers/skopeo "${GOPATH}"/src/github.com/containers/skopeo && \
     cd ${GOPATH}/src/github.com/containers/skopeo && \
     make binary-local DISABLE_CGO=1 && \
     make install-binary && \
     cp /usr/bin/skopeo /build_output/deps/ && \
     cp default-policy.json /build_output/configs/skopeo-policy.json
 
-COPY . /buildsource
 WORKDIR /buildsource
+COPY . /buildsource
 
 # create anchore binaries
 RUN set -ex && \
     echo "installing anchore" && \
     pip3 wheel --wheel-dir=/build_output/wheels . && \
-    pip3 wheel --wheel-dir=/build_output/wheels/ git+git://github.com/anchore/anchore-cli.git@$CLI_COMMIT\#egg=anchorecli && \
+    pip3 wheel --wheel-dir=/build_output/wheels/ git+git://github.com/anchore/anchore-cli.git@"${CLI_COMMIT}"\#egg=anchorecli && \
     cp ./LICENSE /build_output/ && \
     cp ./conf/default_config.yaml /build_output/configs/default_config.yaml && \
     cp ./scripts/docker-compose/anchore-prometheus.yml /build_output/configs/anchore-prometheus.yml && \
@@ -61,19 +69,6 @@ ARG CLI_COMMIT
 ARG ANCHORE_COMMIT
 ARG ANCHORE_ENGINE_VERSION="0.6.1"
 ARG ANCHORE_ENGINE_RELEASE="r0"
-
-# Container metadata section
-MAINTAINER dev@anchore.com
-
-LABEL anchore_cli_commit=$CLI_COMMIT \
-      anchore_commit=$ANCHORE_COMMIT \
-      name="anchore-engine" \
-      maintainer="dev@anchore.com" \
-      vendor="Anchore Inc." \
-      version=$ANCHORE_ENGINE_VERSION \
-      release=$ANCHORE_ENGINE_RELEASE \
-      summary="Anchore Engine - container image scanning service for policy-based security, best-practice and compliance enforcement." \
-      description="Anchore is an open platform for container security and compliance that allows developers, operations, and security teams to discover, analyze, and certify container images on-premises or in the cloud. Anchore Engine is the on-prem, OSS, API accessible service that allows ops and developers to perform detailed analysis, run queries, produce reports and define policies on container images that can be used in CI/CD pipelines to ensure that only containers that meet your organization’s requirements are deployed into production."
 
 # Environment variables to be present in running environment
 ENV LANG=en_US.UTF-8 LC_ALL=C.UTF-8
@@ -122,8 +117,6 @@ ENV ANCHORE_CONFIG_DIR=/config \
     AUTHLIB_INSECURE_TRANSPORT=true
 # Insecure transport required in case for things like tls sidecars
 
-# Container run environment settings
-
 #VOLUME /analysis_scratch
 EXPOSE ${ANCHORE_SERVICE_PORT}
 
@@ -131,19 +124,31 @@ EXPOSE ${ANCHORE_SERVICE_PORT}
 RUN set -ex && \
     groupadd --gid 1000 anchore && \
     useradd --uid 1000 --gid anchore --shell /bin/bash --create-home anchore && \
-    mkdir ${ANCHORE_SERVICE_DIR} && \
-    mkdir /config && \
-    mkdir /licenses && \
-    mkdir -p /var/log/anchore && chown -R anchore:anchore /var/log/anchore && \
-    mkdir -p /var/run/anchore && chown -R anchore:anchore /var/run/anchore && \
-    mkdir -p /analysis_scratch && chown -R anchore:anchore /analysis_scratch && \
-    mkdir -p /workspace && chown -R anchore:anchore /workspace && \
-    mkdir -p ${ANCHORE_SERVICE_DIR} && chown -R anchore:anchore /anchore_service && \
+    mkdir -p \
+        /config \
+        /etc/containers \
+        /licenses \
+        /var/log/anchore \
+        /var/run/anchore \ 
+        /analysis_scratch \
+        /workspace \
+        ${ANCHORE_SERVICE_DIR} && \
+    chown -R anchore:anchore \
+        /config \
+        /licenses \
+        /var/log/anchore \
+        /var/run/anchore \ 
+        /analysis_scratch \
+        /workspace \
+        ${ANCHORE_SERVICE_DIR}
 
-# Build dependencies
 RUN set -ex && \
     yum update -y && \
-    yum install -y python36 python3-wheel procps psmisc && \
+    yum install -y \
+        python36 \
+        python3-wheel \
+        procps \
+        psmisc && \
     yum clean all
 
 WORKDIR /anchore-engine
@@ -151,6 +156,7 @@ WORKDIR /anchore-engine
 # Copy artifacts from build step
 COPY --from=anchore-engine-builder /build_output /build_output
 
+# Install anchore-engine and all dependencies
 RUN set -ex && \
     cp /build_output/LICENSE /licenses/ && \
     cp /build_output/configs/default_config.yaml /config/config.yaml && \
@@ -159,18 +165,24 @@ RUN set -ex && \
     cp /build_output/configs/docker-compose.yaml /docker-compose.yaml && \
     cp /build_output/configs/docker-compose-dev.yaml /docker-compose-dev.yaml && \
     cp /build_output/configs/docker-entrypoint.sh /docker-entrypoint.sh && \
-    md5sum /config/config.yaml > /config/build_installed && \
-    chmod +x /docker-entrypoint.sh
-
-# Perform the anchore-engine build and install
-RUN set -ex && \
-    pip3 install --no-index --find-links=./ /build_output/wheels/*.whl && \
     cp /build_output/deps/skopeo /usr/bin/skopeo && \
-    mkdir -p /etc/containers && \
     cp /build_output/configs/skopeo-policy.json /etc/containers/policy.json && \
+    pip3 install --no-index --find-links=./ /build_output/wheels/*.whl && \
     yum install -y /build_output/deps/dpkg*.rpm && \
     yum clean all && \
+    md5sum /config/config.yaml > /config/build_installed && \
+    chmod +x /docker-entrypoint.sh && \
     rm -rf /build_output /root/.cache
+
+LABEL anchore_cli_commit=$CLI_COMMIT \
+      anchore_commit=$ANCHORE_COMMIT \
+      name="anchore-engine" \
+      maintainer="dev@anchore.com" \
+      vendor="Anchore Inc." \
+      version=$ANCHORE_ENGINE_VERSION \
+      release=$ANCHORE_ENGINE_RELEASE \
+      summary="Anchore Engine - container image scanning service for policy-based security, best-practice and compliance enforcement." \
+      description="Anchore is an open platform for container security and compliance that allows developers, operations, and security teams to discover, analyze, and certify container images on-premises or in the cloud. Anchore Engine is the on-prem, OSS, API accessible service that allows ops and developers to perform detailed analysis, run queries, produce reports and define policies on container images that can be used in CI/CD pipelines to ensure that only containers that meet your organization’s requirements are deployed into production."
 
 # Container runtime instructions
 HEALTHCHECK --start-period=20s \
