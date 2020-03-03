@@ -11,6 +11,7 @@ import anchore_engine.common.helpers
 from anchore_engine.clients.services.catalog import CatalogClient
 from anchore_engine.clients.services import internal_client_for
 import anchore_engine.common
+from anchore_engine.subsys import logger
 
 authorizer = get_authorizer()
 
@@ -19,7 +20,7 @@ def make_response_registry(user_auth, registry_record, params):
     userId, pw = user_auth
 
     try:
-        for k in ['registry', 'userId', 'registry_user', 'registry_verify', 'registry_type']:
+        for k in ['registry', 'userId', 'registry_user', 'registry_verify', 'registry_type', 'registry_name']:
             ret[k] = registry_record[k]
 
         for datekey in ['last_updated', 'created_at']:
@@ -113,11 +114,17 @@ def create_registry(registrydata, validate=True):
         registrydata = json.loads(bodycontent)
         try:
             input_registry = registrydata.get('registry', None)
-
+            
             if input_registry:
                 # do some input string checking
-                if re.match(".*\/.*", input_registry):
-                    raise Exception("input registry name cannot contain '/' characters - valid registry names are of the form <host>:<port> where :<port> is optional")
+                errmsg = None
+                if re.match(".*/+$", input_registry):
+                    errmsg = "input registry name cannot end with trailing '/' characters"
+                elif re.match("^http[s]*://", input_registry):
+                    errmsg = "input registry name must start with a hostname/ip, without URI schema (http://, https://)"
+
+                if errmsg:
+                    raise Exception(errmsg)
 
         except Exception as err:
             httpcode = 409
@@ -161,8 +168,8 @@ def update_registry(registry, registrydata, validate=True):
                     raise Exception("registry name in path does not equal registry name in body")
 
                 # do some input string checking
-                if re.match(".*\/.*", input_registry):
-                    raise Exception("input registry name cannot contain '/' characters - valid registry names are of the form <host>:<port> where :<port> is optional")
+                #if re.match(".*\/.*", input_registry):
+                #    raise Exception("input registry name cannot contain '/' characters - valid registry names are of the form <host>:<port> where :<port> is optional")
         except Exception as err:
             httpcode = 409
             raise err

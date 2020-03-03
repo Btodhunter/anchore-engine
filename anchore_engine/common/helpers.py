@@ -9,29 +9,43 @@ import time
 from anchore_engine.subsys import logger
 
 
-def make_response_error(errmsg, in_httpcode=None, **kwargs):
+def make_response_error(errmsg, in_httpcode=None, details=None):
+    if details is None:
+        details = {}
     if not in_httpcode:
         httpcode = 500
     else:
         httpcode = in_httpcode
-    detail = {}
+
     msg = str(errmsg)
 
     ret = {
         'message': msg,
         'httpcode': int(httpcode),
-        'detail': kwargs.get('detail', {})
+        'detail': details
     }
+    if 'error_codes' not in ret['detail']:
+        ret['detail']['error_codes'] = []
 
-    if type(errmsg) == Exception:
+    if isinstance(errmsg, Exception):
         if 'anchore_error_json' in errmsg.__dict__:
-            if set(['message', 'httpcode', 'detail']).issubset(set(errmsg.__dict__['anchore_error_json'])):
+            if {'message', 'httpcode', 'detail'}.issubset(set(errmsg.__dict__['anchore_error_json'])):
                 ret.update(errmsg.__dict__['anchore_error_json'])
 
+            try:
+                if {'error_code'}.issubset(set(errmsg.__dict__['anchore_error_json'])) and errmsg.__dict__['anchore_error_json'].get('error_code', None):
+                    if 'error_codes' not in ret['detail']:
+                        ret['detail']['error_codes'] = []
+                    ret['detail']['error_codes'].append(errmsg.__dict__['anchore_error_json'].get('error_code'))
+            except Exception as err:
+                try:
+                    logger.warn("unable to marshal error details: source error {}".format(errmsg.__dict__))
+                except:
+                    pass
     return(ret)
 
 
-def make_anchore_exception(err, input_message=None, input_httpcode=None, input_detail=None, override_existing=False):
+def make_anchore_exception(err, input_message=None, input_httpcode=None, input_detail=None, override_existing=False, input_error_codes=None):
     ret = Exception(err)
 
     if not input_message:
@@ -44,6 +58,11 @@ def make_anchore_exception(err, input_message=None, input_httpcode=None, input_d
     else:
         detail = {'raw_exception_message': str(err)}
 
+    if input_error_codes != None:
+        error_codes = input_error_codes
+    else:
+        error_codes = []
+
     if not input_httpcode:
         httpcode = 500
     else:
@@ -51,9 +70,12 @@ def make_anchore_exception(err, input_message=None, input_httpcode=None, input_d
 
     anchore_error_json = {}
     try:
-        if type(err) == Exception:
+        if isinstance(err, Exception):
             if 'anchore_error_json' in err.__dict__:
                 anchore_error_json.update(err.__dict__['anchore_error_json'])
+
+            if 'error_code' in err.__dict__:
+                error_codes.append(err.__dict__.get('error_code'))
     except:
         pass
 
@@ -61,11 +83,18 @@ def make_anchore_exception(err, input_message=None, input_httpcode=None, input_d
         ret.anchore_error_json = {
             'message': message,
             'detail': detail,
-            'httpcode': httpcode,
+            'httpcode': httpcode
         }
     else:
         ret.anchore_error_json = anchore_error_json
 
+    if 'detail' in ret.anchore_error_json:
+        if 'error_codes' not in ret.anchore_error_json['detail']:
+            ret.anchore_error_json['detail']['error_codes'] = []
+
+        if error_codes:
+            ret.anchore_error_json['detail']['error_codes'].extend(error_codes)
+                                   
     return(ret)
 
 

@@ -21,13 +21,6 @@ schemes:
 - "https"
 - "http"
 
-securityDefinitions:
-  basicAuth:
-    type: basic
-
-security:
-  - basicAuth: []
-
 paths:
   /status:
     get:
@@ -208,7 +201,6 @@ paths:
         required: true
       responses:
         200:
-          description: "success"
           description: "Queue element"
           schema:
             type: object

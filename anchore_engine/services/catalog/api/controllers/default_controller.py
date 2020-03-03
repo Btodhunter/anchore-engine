@@ -30,64 +30,6 @@ def status():
 
     return (return_object, httpcode)
 
-
-@authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
-def query_vulnerabilities_get(id=None, affected_package=None, affected_package_version=None):
-    try:
-        request_inputs = anchore_engine.apis.do_request_prep(connexion.request, default_params={'id': id, 'affected_package': affected_package, 'affected_package_version': affected_package_version})
-        client = internal_client_for(PolicyEngineClient, userId=ApiRequestContextProxy.namespace())
-        resp = client.query_vulnerabilities(vuln_id=request_inputs.get('params',{}).get('id'),
-                                            affected_package=request_inputs.get('params',{}).get('affected_package'),
-                                            affected_package_version=request_inputs.get('params',{}).get('affected_package_version'))
-        code = 200
-    except Exception as err:
-        logger.exception('Error dispatching/receiving request from policy engine for vulnerability query')
-        resp = str(err)
-        code = 500
-
-    return resp, code
-
-
-@authorizer.requires_account(with_types=[AccountTypes.service, AccountTypes.admin])
-def query_images_by_package_get(name=None, version=None, package_type=None):
-    try:
-        request_inputs = anchore_engine.apis.do_request_prep(connexion.request, default_params={'name': name, 'version': version, 'package_type': package_type})
-        client = internal_client_for(PolicyEngineClient, userId=ApiRequestContextProxy.namespace())
-        logger.info('Params for image by_package: {}'.format(request_inputs))
-
-        return_object = client.query_images_by_package(user_id=ApiRequestContextProxy.namespace(),
-                                                       name=request_inputs.get('params',{}).get('name'),
-                                                       version=request_inputs.get('params',{}).get('version'),
-                                                       package_type=request_inputs.get('params',{}).get('package_type'))
-        httpcode = 200
-    except Exception as err:
-        logger.exception('Error dispatching/receiving request from policy engine for image query by package')
-        httpcode = 500
-        return_object = str(err)
-
-
-    return (return_object, httpcode)
-
-
-@authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
-def query_images_by_vulnerability_get(vulnerability_id=None, severity=None, namespace=None, affected_package=None, vendor_only=True):
-    try:
-        request_inputs = anchore_engine.apis.do_request_prep(connexion.request, default_params={'vulnerability_id': vulnerability_id, 'severity': severity, 'namespace': namespace, 'affected_package': affected_package, 'vendor_only': vendor_only})
-        client = internal_client_for(PolicyEngineClient, userId=ApiRequestContextProxy.namespace())
-        return_object = client.query_images_by_vulnerability(user_id=ApiRequestContextProxy.namespace(),
-                                                             vulnerability_id=request_inputs.get('params',{}).get('vulnerability_id'),
-                                                             severity=request_inputs.get('params',{}).get('severity'),
-                                                             namespace=request_inputs.get('params',{}).get('namespace'),
-                                                             affected_package=request_inputs.get('params',{}).get('affected_package'),
-                                                             vendor_only=request_inputs.get('params',{}).get('vendor_only'))
-        httpcode = 200
-    except Exception as err:
-        httpcode = 500
-        return_object = str(err)
-
-    return (return_object, httpcode)
-
-
 @authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
 def repo_post(regrepo=None, autosubscribe=False, lookuptag=None, bodycontent={}):
     try:
@@ -130,14 +72,14 @@ def list_images(tag=None, digest=None, imageId=None, registry_lookup=False, hist
 
 
 @authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
-def add_image(image_metadata=None, tag=None, digest=None, created_at=None, from_archive=False):
+def add_image(image_metadata=None, tag=None, digest=None, created_at=None, from_archive=False, allow_dockerfile_update=False):
     try:
         if image_metadata is None:
             image_metadata = {}
 
         request_inputs = anchore_engine.apis.do_request_prep(connexion.request,
                                                              default_params={'tag': tag, 'digest': digest,
-                                                                             'created_at': created_at})
+                                                                             'created_at': created_at, 'allow_dockerfile_update': allow_dockerfile_update})
         if from_archive:
             task = archiver.RestoreArchivedImageTask(account=ApiRequestContextProxy.namespace(), image_digest=digest)
             task.start()
@@ -193,7 +135,7 @@ def update_image(imageDigest, image):
 @authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
 def delete_image(imageDigest, force=False):
     try:
-        request_inputs = anchore_engine.apis.do_request_prep(connexion.request, default_params={'force':False})
+        request_inputs = anchore_engine.apis.do_request_prep(connexion.request, default_params={'force': False})
         with db.session_scope() as session:
             return_object, httpcode = anchore_engine.services.catalog.catalog_impl.image_imageDigest(session, request_inputs, imageDigest)
 
@@ -221,18 +163,18 @@ def registry_lookup(tag=None, digest=None):
 
 
 # @api.route('/import', methods=['POST'])
-@authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
-def image_import(bodycontent):
-    try:
-        request_inputs = anchore_engine.apis.do_request_prep(connexion.request, default_params={})
-        with db.session_scope() as session:
-            return_object, httpcode = anchore_engine.services.catalog.catalog_impl.image_import(session, request_inputs, bodycontent=bodycontent)
-
-    except Exception as err:
-        httpcode = 500
-        return_object = str(err)
-
-    return (return_object, httpcode)
+#@authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
+#def image_import(bodycontent):
+#    try:
+#        request_inputs = anchore_engine.apis.do_request_prep(connexion.request, default_params={})
+#        with db.session_scope() as session:
+#            return_object, httpcode = anchore_engine.services.catalog.catalog_impl.image_import(session, request_inputs, bodycontent=bodycontent)
+#
+#    except Exception as err:
+#        httpcode = 500
+#        return_object = str(err)
+#
+#    return (return_object, httpcode)
 
 
 
@@ -316,13 +258,14 @@ def subscriptions_subscriptionId_delete(subscriptionId):
 
 @flask_metrics.do_not_track()
 @authorizer.requires_account(with_types=INTERNAL_SERVICE_ALLOWED)
-def events_get(source_servicename=None, source_hostid=None, resource_type=None, resource_id=None, level=None, since=None, before=None, page=None, limit=None):
+def events_get(source_servicename=None, source_hostid=None, resource_type=None, event_type=None, resource_id=None, level=None, since=None, before=None, page=None, limit=None):
     try:
         request_inputs = anchore_engine.apis.do_request_prep(connexion.request,
                                                              default_params={'source_servicename': source_servicename,
                                                                                         'source_hostid': source_hostid,
                                                                                         'resource_type': resource_type,
                                                                                         'resource_id': resource_id,
+                                                                                        'event_type': event_type,
                                                                                         'level': level,
                                                                                         'since': since,
                                                                                         'before': before,

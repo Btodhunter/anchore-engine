@@ -17,10 +17,35 @@ cleanup_images: true
 allow_awsecr_iam_auto: true
 host_id: "${ANCHORE_HOST_ID}"
 internal_ssl_verify: ${ANCHORE_INTERNAL_SSL_VERIFY}
+
+global_client_connect_timeout: ${ANCHORE_GLOBAL_CLIENT_CONNECT_TIMEOUT}
+global_client_read_timeout: ${ANCHORE_GLOBAL_CLIENT_READ_TIMEOUT}
+
 auto_restart_services: false
+
+# Locations for keys used for signing and encryption. Only one of 'secret' or 'public_key_path'/'private_key_path' needs to be set. If all are set then the keys take precedence over the secret value
+# Secret is for a shared secret and if set, all components in anchore should have the exact same value in their configs.
+#
+keys:
+  secret: ${ANCHORE_AUTH_SECRET}
+  public_key_path: ${ANCHORE_AUTH_PUBKEY}
+  private_key_path: ${ANCHORE_AUTH_PRIVKEY}
+
+# Configuring supported user authentication and credential management
+user_authentication:
+  oauth:
+    enabled: ${ANCHORE_OAUTH_ENABLED}
+    default_token_expiration_seconds: ${ANCHORE_OAUTH_TOKEN_EXPIRATION}
+
+  # Set this to True to enable storing user passwords only as secure hashes in the db. This can dramatically increase CPU usage if you
+  # don't also use oauth and tokens for internal communications (which requires keys/secret to be configured as well)
+  # WARNING: you should not change this after a system has been initialized as it may cause a mismatch in existing passwords
+  hashed_passwords: ${ANCHORE_AUTH_ENABLE_HASHED_PASSWORDS}
+
 
 metrics:
   enabled: ${ANCHORE_ENABLE_METRICS}
+  auth_disabled: ${ANCHORE_DISABLE_METRICS_AUTH}
 
 # Uncomment if you have a local endpoint that can accept
 # notifications from the anchore-engine, as configured below
@@ -50,10 +75,13 @@ feeds:
       # Warning: enabling the packages and nvd sync causes the service to require much
       #   more memory to do process the significant data volume. We recommend at least 4GB available for the container
       packages: false
-      nvd: false
+      nvdv2: true
       # Enabling snyk syncs snyk vulnerability data from an on-premise anchore enterprise feeds service. Please contact
       # anchore support for finding out more about this service
       snyk: false
+      # Enabling vulndb syncs vulndb vulnerability data from an on-premise anchore enterprise feeds service. Please contact
+      # anchore support for finding out more about this service
+      vulndb: false
   anonymous_user_username: anon@ancho.re
   anonymous_user_password: pbiU2RYZ2XrmYQ
   url: ${ANCHORE_FEEDS_URL}
@@ -72,7 +100,7 @@ default_admin_email: ${ANCHORE_ADMIN_EMAIL}
 
 credentials:
   database:
-    db_connect: 'postgresql+pg8000://${ANCHORE_DB_USER}:${ANCHORE_DB_PASSWORD}@${ANCHORE_DB_HOST}:${ANCHORE_DB_PORT}/${ANCHORE_DB_NAME}'
+    db_connect: 'postgresql://${ANCHORE_DB_USER}:${ANCHORE_DB_PASSWORD}@${ANCHORE_DB_HOST}:${ANCHORE_DB_PORT}/${ANCHORE_DB_NAME}'
     db_connect_args:
       timeout: 120
       ssl: false
@@ -122,10 +150,11 @@ services:
       policy_eval: 3600
       vulnerability_scan: 14400
       analyzer_queue: 1
-      notifications: 30
+      notifications: ${ANCHORE_CATALOG_NOTIFICATION_INTERVAL_SEC}
       service_watcher: 15
       policy_bundle_sync: 300
       repo_watcher: 60
+      archive_tasks: 43200 # 12 hours between archive task run
     event_log:
       notification:
         enabled: ${ANCHORE_EVENTS_NOTIFICATIONS_ENABLED}

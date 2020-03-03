@@ -40,8 +40,6 @@ def init_analyzer_cmdline(argv, name):
         if anchore_analyzer_config and name in anchore_analyzer_config:
             ret['analyzer_config'] = anchore_analyzer_config[name]
 
-    #ret['anchore_config'] = anchore_conf.data
-
     ret['name'] = name
     
     with open(argv[0], 'r') as FH:
@@ -89,7 +87,10 @@ def run_tarfile_member_function(tarfilename, *args, member_regexp=None, func=_de
 
     ret = {}
     with tarfile.open(tarfilename, mode='r', format=tarfile.PAX_FORMAT) as tfl:
-        for member in tfl.getmembers():
+        memberhash = get_memberhash(tfl)
+        kwargs['memberhash'] = memberhash
+        #for member in tfl.getmembers():
+        for member in list(memberhash.values()):
             if not memberpatt or memberpatt.match(member.name):
                 if ret.get(member.name):
                     print("WARN: duplicate member name when preparing return from run_tarfile_member_function() - {}".format(member.name))
@@ -109,7 +110,29 @@ def run_tarfile_function(tarfile, func=None, *args, **kwargs):
 
     return(ret)
 
-def get_distro_from_squashtar(squashtar):
+def _search_tarfilenames_for_file(tarfilenames, searchfile):
+    ret = None
+    if searchfile in tarfilenames:
+        ret = searchfile
+    elif "./{}".format(searchfile) in tarfilenames:
+        ret = "./{}".format(searchfile)
+    elif "/{}".format(searchfile) in tarfilenames:
+        ret = "/{}".format(searchfile)
+    elif re.sub("^/", "", searchfile) in tarfilenames:
+        ret = re.sub("^/", "", searchfile)
+    return(ret)
+
+def get_memberhash(tfl):
+    memberhash = {}
+    for member in tfl.getmembers():
+        memberhash[member.name] = member
+    return(memberhash)
+
+def get_distro_from_squashtar(squashtar, unpackdir=None):
+    if unpackdir and os.path.exists(os.path.join(unpackdir, 'analyzer_meta.json')):
+        with open(os.path.join(unpackdir, 'analyzer_meta.json'), 'r') as FH:
+            return(json.loads(FH.read()))
+
     meta = {
         'DISTRO':None,
         'DISTROVERS':None,
@@ -118,172 +141,130 @@ def get_distro_from_squashtar(squashtar):
 
     with tarfile.open(squashtar, mode='r', format=tarfile.PAX_FORMAT) as tfl:
         tarfilenames = tfl.getnames()
-        if "etc/os-release" in tarfilenames: 
-            with tfl.extractfile(tfl.getmember("etc/os-release")) as FH:
-                for l in FH.readlines():
-                    l = anchore_engine.utils.ensure_str(l)
-                    l = l.strip()
-                    try:
-                        (key, val) = l.split("=")
-                        val = re.sub(r'"', '', val)
-                        if key == "ID":
-                            meta['DISTRO'] = val
-                        elif key == "VERSION_ID":
-                            meta['DISTROVERS'] = val
-                        elif key == "ID_LIKE":
-                            meta['LIKEDISTRO'] = ','.join(val.split())
-                    except Exception as err:
-                        pass
 
-        elif "etc/system-release-cpe" in tarfilenames: 
-            with tfl.extractfile(tfl.getmember("etc/system-release-cpe")) as FH:
-                for l in FH.readlines():
-                    l = anchore_engine.utils.ensure_str(l)
-                    l = l.strip()
-                    try:
-                        distro = l.split(':')[2]
-                        vers = l.split(':')[4]
-                        meta['DISTRO'] = distro
-                        meta['DISTROVERS'] = vers
-                    except:
-                        pass
+        metamap = {
+            "os-release": _search_tarfilenames_for_file(tarfilenames, "etc/os-release"),
+            "system-release-cpe": _search_tarfilenames_for_file(tarfilenames, "etc/system-release-cpe"),
+            "redhat-release": _search_tarfilenames_for_file(tarfilenames, "etc/redhat-release"),
+            "busybox": _search_tarfilenames_for_file(tarfilenames, "bin/busybox"),
+            "debian_version": _search_tarfilenames_for_file(tarfilenames, "etc/debian_version"),
+        }
 
-        elif "etc/redhat-release" in tarfilenames: 
-            with tfl.extractfile(tfl.getmember("etc/redhat-release")) as FH:
-                for l in FH.readlines():
-                    l = anchore_engine.utils.ensure_str(l)
-                    l = l.strip()
-                    try:
-                        distro = vers = None
-                        patt = re.match(".*CentOS.*", l)
-                        if patt:
-                            distro = 'centos'
-
-                        patt = re.match(".*(\d+\.\d+).*", l)
-                        if patt:
-                            vers = patt.group(1)
-
-                        if distro:
-                            meta['DISTRO'] = distro
-                        if vers:
-                            meta['DISTROVERS'] = vers
-                    except:
-                        pass
         
-        elif "bin/busybox" in tarfilenames:
-            meta['DISTRO'] = "busybox"
-            meta['DISTROVERS'] = "0"
+        success = False
+        if not success and metamap['os-release'] in tarfilenames:
             try:
-                with tfl.extractfile(tfl.getmember("bin/busybox")) as FH:
-                    for line in FH.readlines():
-                        patt = re.match(b".*BusyBox (v[\d|\.]+) \(.*", line)
-                        if patt:
-                            meta['DISTROVERS'] = anchore_engine.utils.ensure_str(patt.group(1))
-            except Exception as err:
+                with tfl.extractfile(tfl.getmember(metamap['os-release'])) as FH:
+                    for l in FH.readlines():
+                        l = anchore_engine.utils.ensure_str(l)
+                        l = l.strip()
+                        try:
+                            (key, val) = l.split("=")
+                            val = re.sub(r'"', '', val)
+                            if key == "ID":
+                                meta['DISTRO'] = val
+                            elif key == "VERSION_ID":
+                                meta['DISTROVERS'] = val
+                            elif key == "ID_LIKE":
+                                meta['LIKEDISTRO'] = ','.join(val.split())
+                        except Exception as err:
+                            pass
+                success = True
+            except:
+                success = False
+
+        if not success and metamap['system-release-cpe'] in tarfilenames: 
+            try:
+                with tfl.extractfile(tfl.getmember(metamap['system-release-cpe'])) as FH:
+                    for l in FH.readlines():
+                        l = anchore_engine.utils.ensure_str(l)
+                        l = l.strip()
+                        try:
+                            vendor = l.split(':')[2]
+                            distro = l.split(':')[3]
+                            vers = l.split(':')[4]
+
+                            if re.match(".*fedora.*", vendor.lower()):
+                                distro = 'fedora'
+                            elif re.match(".*redhat.*", vendor.lower()):
+                                distro = 'rhel'
+                            elif re.match(".*centos.*", vendor.lower()):
+                                distro = 'centos'
+
+                            meta['DISTRO'] = distro
+                            meta['DISTROVERS'] = vers
+                        except:
+                            pass
+                success = True
+            except:
+                success = False
+
+        if not success and metamap["redhat-release"] in tarfilenames: 
+            try:
+                with tfl.extractfile(tfl.getmember(metamap["redhat-release"])) as FH:
+                    for l in FH.readlines():
+                        l = anchore_engine.utils.ensure_str(l)
+                        l = l.strip()
+                        try:
+                            distro = vers = None
+
+                            if re.match(".*centos.*", l.lower()):
+                                distro = 'centos'
+                            elif re.match(".*redhat.*", l.lower()):
+                                distro = 'rhel'
+                            elif re.match(".*fedora.*", l.lower()):
+                                distro = 'fedora'
+
+                            patt = re.match(r".*(\d+\.\d+).*", l)
+                            if patt:
+                                vers = patt.group(1)
+
+                            if not vers:
+                                patt = re.match(r".*(\d+).*", l)
+                                if patt:
+                                    vers = patt.group(1)
+
+                            if distro:
+                                meta['DISTRO'] = distro
+                            if vers:
+                                meta['DISTROVERS'] = vers
+                        except:
+                            pass
+                success = True
+            except:
+                success = False
+
+        if not success and metamap["busybox"] in tarfilenames:
+            try:
+                meta['DISTRO'] = "busybox"
                 meta['DISTROVERS'] = "0"
-
-        if meta['DISTRO'] == 'debian' and not meta['DISTROVERS'] and "etc/debian_version" in tarfilenames: 
-            with tfl.extractfile(tfl.getmember("etc/debian_version")) as FH:
-                meta['DISTRO'] = 'debian'
-                for line in FH.readlines():
-                    line = anchore_engine.utils.ensure_str(line)
-                    line = line.strip()
-                    patt = re.match("(\d+)\..*", line)
-                    if patt:
-                        meta['DISTROVERS'] = patt.group(1)
-                    elif re.match(".*sid.*", line):
-                        meta['DISTROVERS'] = 'unstable'
-
-    if not meta['DISTRO']:
-        meta['DISTRO'] = "Unknown"
-    if not meta['DISTROVERS']:
-        meta['DISTROVERS'] = "0"
-    if not meta['LIKEDISTRO']:
-        meta['LIKEDISTRO'] = meta['DISTRO']
-
-    return(meta)
-
-def get_distro_from_path(inpath):
-
-    meta = {
-        'DISTRO':None,
-        'DISTROVERS':None,
-        'LIKEDISTRO':None
-    }
-
-    if os.path.exists('/'.join([inpath,"/etc/os-release"])):
-        with open('/'.join([inpath,"/etc/os-release"]), 'r') as FH:
-            for l in FH.readlines():
-                l = l.strip()
-                #l = l.decode('utf8')
                 try:
-                    (key, val) = l.split("=")
-                    val = re.sub(r'"', '', val)
-                    if key == "ID":
-                        meta['DISTRO'] = val
-                    elif key == "VERSION_ID":
-                        meta['DISTROVERS'] = val
-                    elif key == "ID_LIKE":
-                        meta['LIKEDISTRO'] = ','.join(val.split())
-                except:
-                    pass
+                    with tfl.extractfile(tfl.getmember(metamap["busybox"])) as FH:
+                        for line in FH.readlines():
+                            patt = re.match(rb".*BusyBox (v[\d|\.]+) \(.*", line)
+                            if patt:
+                                meta['DISTROVERS'] = anchore_engine.utils.ensure_str(patt.group(1))
+                except Exception as err:
+                    meta['DISTROVERS'] = "0"
+                success = True
+            except:
+                success = False
 
-    elif os.path.exists('/'.join([inpath, "/etc/system-release-cpe"])):
-
-        with open('/'.join([inpath, "/etc/system-release-cpe"]), 'r') as FH:
-            for l in FH.readlines():
-                l = l.strip()
-                #l = l.decode('utf8')
-                try:
-                    distro = l.split(':')[2]
-                    vers = l.split(':')[4]
-                    meta['DISTRO'] = distro
-                    meta['DISTROVERS'] = vers
-                except:
-                    pass
-
-    elif os.path.exists('/'.join([inpath, "/etc/redhat-release"])):
-        with open('/'.join([inpath, "/etc/redhat-release"]), 'r') as FH:
-            for l in FH.readlines():
-                l = l.strip()
-                #l = l.decode('utf8')
-                try:
-                    distro = vers = None
-                    patt = re.match(".*CentOS.*", l)
-                    if patt:
-                        distro = 'centos'
-
-                    patt = re.match(".*(\d+\.\d+).*", l)
-                    if patt:
-                        vers = patt.group(1)
-
-                    if distro:
-                        meta['DISTRO'] = distro
-                    if vers:
-                        meta['DISTROVERS'] = vers
-                except:
-                    pass
-
-    elif os.path.exists('/'.join([inpath, "/bin/busybox"])):
-        meta['DISTRO'] = "busybox"
-        try:
-            sout = subprocess.check_output(['/'.join([inpath, "/bin/busybox"])])
-            fline = str(sout.splitlines(True)[0], 'utf-8')
-            slist = fline.split()
-            meta['DISTROVERS'] = slist[1]
-        except:
-            meta['DISTROVERS'] = "0"
-
-    if meta['DISTRO'] == 'debian' and not meta['DISTROVERS'] and os.path.exists('/'.join([inpath, "/etc/debian_version"])):
-        with open('/'.join([inpath, "/etc/debian_version"]), 'r') as FH:
-            meta['DISTRO'] = 'debian'
-            for line in FH.readlines():
-                line = line.strip()
-                patt = re.match("(\d+)\..*", line)
-                if patt:
-                    meta['DISTROVERS'] = patt.group(1)
-                elif re.match(".*sid.*", line):
-                    meta['DISTROVERS'] = 'unstable'
+        if meta['DISTRO'] == 'debian' and not meta['DISTROVERS'] and metamap["debian_version"] in tarfilenames: 
+            try:
+                with tfl.extractfile(tfl.getmember(metamap["debian_version"])) as FH:
+                    meta['DISTRO'] = 'debian'
+                    for line in FH.readlines():
+                        line = anchore_engine.utils.ensure_str(line)
+                        line = line.strip()
+                        patt = re.match(r"(\d+)\..*", line)
+                        if patt:
+                            meta['DISTROVERS'] = patt.group(1)
+                        elif re.match(".*sid.*", line):
+                            meta['DISTROVERS'] = 'unstable'
+                success = True
+            except:
+                success = False
 
     if not meta['DISTRO']:
         meta['DISTRO'] = "Unknown"
@@ -342,14 +323,14 @@ def get_distro_flavor(distro, version, likedistro=None):
             if ret['flavor'] != 'Unknown':
                 break
 
-    patt = re.match("(\d*)\.*(\d*)", version)
+    patt = re.match(r"(\d*)\.*(\d*)", version)
     if patt:
         (vmaj, vmin) = patt.group(1,2)
         if vmaj:
             ret['version'] = vmaj
             ret['likeversion'] = vmaj
 
-    patt = re.match("(\d+)\.*(\d+)\.*(\d+)", version)
+    patt = re.match(r"(\d+)\.*(\d+)\.*(\d+)", version)
     if patt:
         (vmaj, vmin, submin) = patt.group(1,2,3)
         if vmaj and vmin:
@@ -358,12 +339,15 @@ def get_distro_flavor(distro, version, likedistro=None):
 
     return(ret)
 
-def _get_extractable_member(tfl, member, deref_symlink=False, alltfiles={}):
+def _get_extractable_member(tfl, member, deref_symlink=False, alltfiles={}, memberhash={}):
     ret = None
 
     if member.isreg():
         return(member)
 
+    if not memberhash:
+        memberhash = get_memberhash(tfl)
+        
     if deref_symlink and member.issym():
         if not alltfiles:
             alltfiles = {}
@@ -382,17 +366,20 @@ def _get_extractable_member(tfl, member, deref_symlink=False, alltfiles={}):
             
             # attempt to get the softlink destination
             if nmember.linkname[1:] in alltfiles:
-                newmember = tfl.getmember(nmember.linkname[1:])
+                #newmember = tfl.getmember(nmember.linkname[1:])
+                newmember = memberhash.get(nmember.linkname[1:])
             else:
                 if nmember.linkname in alltfiles:
-                    newmember = tfl.getmember(nmember.linkname)
+                    #newmember = tfl.getmember(nmember.linkname)
+                    newmember = memberhash.get(nmember.linkname)
                 else:
                     normpath = os.path.normpath(os.path.join(os.path.dirname(nmember.name), nmember.linkname))
                     if normpath in alltfiles:
-                        newmember = tfl.getmember(normpath)
+                        #newmember = tfl.getmember(normpath)
+                        newmember = memberhash.get(normpath)
 
             if not newmember:
-                print("WARN: exception while looking for symlink destination for symlink file {} -> {}".format(member.name, member.linkname))
+                print("skipping file: looking for symlink destination for symlink file {} -> {}".format(member.name, member.linkname))
                 done=True
             else:
                 nmember = newmember
@@ -423,7 +410,8 @@ def _get_extractable_member(tfl, member, deref_symlink=False, alltfiles={}):
 
         while not done and count < max_links:
             try:
-                nmember = tfl.getmember(nmember.linkname)
+                #nmember = tfl.getmember(nmember.linkname)
+                nmember = memberhash.get(nmember.linkname)
                 if nmember.islnk():
                     if nmember.name not in namehistory:
                         # do it all again
@@ -447,7 +435,7 @@ def _get_extractable_member(tfl, member, deref_symlink=False, alltfiles={}):
 
     return(ret)
 
-def _checksum_member_function(tfl, member, csums=['sha256', 'md5']):
+def _checksum_member_function(tfl, member, csums=['sha256', 'md5'], memberhash={}):
     ret = {}
 
     funcmap = {
@@ -455,15 +443,12 @@ def _checksum_member_function(tfl, member, csums=['sha256', 'md5']):
         'sha1': hashlib.sha1,
         'md5': hashlib.md5,
     }
-
-    filename = member.name
-    if filename[0] != '/':
-        filename = "/{}".format(filename)
-
     if member.isreg():
         extractable_member = member
     elif member.islnk():
-        extractable_member = _get_extractable_member(tfl, member)
+        if not memberhash:
+            memberhash = get_memberhash(tfl)
+        extractable_member = _get_extractable_member(tfl, member, memberhash=memberhash)
     else:
         extractable_member = None
 
@@ -489,7 +474,7 @@ def get_checksums_from_squashtar(squashtar, csums=['sha256', 'md5']):
         results = anchore_engine.analyzers.utils.run_tarfile_member_function(squashtar, func=_checksum_member_function, csums=csums)
         for filename in results.keys():
             fkey = filename
-            if fkey[0] != '/':
+            if not fkey or fkey[0] != '/':
                 fkey = "/{}".format(filename)
             if fkey not in allfiles:
                 allfiles[fkey] = results[filename]        
@@ -498,7 +483,7 @@ def get_checksums_from_squashtar(squashtar, csums=['sha256', 'md5']):
 
     return(allfiles)
         
-def get_files_from_squashtar(squashtar, inpath=None):
+def get_files_from_squashtar(squashtar, unpackdir=None):
 
     filemap = {}
     allfiles = {}
@@ -506,18 +491,19 @@ def get_files_from_squashtar(squashtar, inpath=None):
     tfl = None
     try:
         with tarfile.open(squashtar, mode='r', format=tarfile.PAX_FORMAT) as tfl:
-            #for filename in tfl.getnames():
-            #    member = tfl.getmember(filename)
-            for member in tfl.getmembers():
+            memberhash = get_memberhash(tfl)
+            #for member in tfl.getmembers():
+            for member in list(memberhash.values()):
                 filename = member.name
-
+                filename = re.sub(r"^\./", "/", filename)
+                if not filename:
+                    filename = "/"
                 if not re.match("^/", filename):
                     filename = "/{}".format(filename)
-                osfilename = filename
-
+                
                 finfo = {}
                 finfo['name'] = filename
-                finfo['fullpath'] = filename #re.sub("^{}".format(inpath), "", os.path.normpath(osfilename))
+                finfo['fullpath'] = filename 
                 finfo['size'] = member.size
                 #finfo['mode'] = member.mode
                 modemask = 0o00000000
@@ -554,7 +540,7 @@ def get_files_from_squashtar(squashtar, inpath=None):
                     finfo['type'] = 'dev'
                 elif member.islnk():
                     finfo['type'] = 'file'
-                    extractable_member = _get_extractable_member(tfl, member)
+                    extractable_member = _get_extractable_member(tfl, member, memberhash=memberhash)
                     if extractable_member:
                         finfo['size'] = extractable_member.size
                 else:
@@ -567,7 +553,7 @@ def get_files_from_squashtar(squashtar, inpath=None):
                         dstlist = finfo['linkdst'].split('/')
                         srclist = finfo['name'].split('/')
                         srcpath = srclist[0:-1]
-                        fullpath = os.path.normpath(os.path.join(finfo['linkdst'], osfilename)) #re.sub("^{}".format(inpath), "", os.path.normpath(os.path.join(finfo['linkdst'], osfilename)))
+                        fullpath = os.path.normpath(os.path.join(finfo['linkdst'], filename)) 
                     finfo['linkdst_fullpath'] = fullpath
 
                 fullpath = finfo['fullpath']
@@ -603,94 +589,6 @@ def get_files_from_squashtar(squashtar, inpath=None):
 
     return(filemap, allfiles)
 
-def get_files_from_path(inpath):
-    filemap = {}
-    allfiles = {}
-    real_root = os.open('/', os.O_RDONLY)
-
-    try:
-        #os.chroot(inpath)
-        #for root, dirs, files in os.walk('/', followlinks=True):
-        #for root, dirs, files in os.walk('/', followlinks=False):
-        for root, dirs, files in os.walk(inpath, followlinks=False):
-            for name in dirs + files:
-                filename = re.sub("^{}".format(inpath), "", os.path.join(root, name)) #.decode('utf8')
-                osfilename = os.path.join(root, name)
-
-                fstat = os.lstat(osfilename)
-
-                finfo = {}
-                finfo['name'] = filename
-                finfo['fullpath'] = re.sub("^{}".format(inpath), "", os.path.normpath(osfilename))
-                finfo['size'] = fstat.st_size
-                finfo['mode'] = fstat.st_mode
-                finfo['uid'] = fstat.st_uid
-                finfo['gid'] = fstat.st_gid
-                
-                mode = finfo['mode']
-                finfo['linkdst'] = None
-                finfo['linkdst_fullpath'] = None
-                if S_ISREG(mode):
-                    finfo['type'] = 'file'
-                elif S_ISDIR(mode):
-                    finfo['type'] = 'dir'
-                elif S_ISLNK(mode):
-                    finfo['type'] = 'slink'
-                    finfo['linkdst'] = re.sub("^{}".format(inpath), "", os.readlink(osfilename))
-                elif S_ISCHR(mode) or S_ISBLK(mode):
-                    finfo['type'] = 'dev'
-                else:
-                    finfo['type'] = 'UNKNOWN'
-
-                if finfo['type'] == 'slink' or finfo['type'] == 'hlink':
-                    if re.match("^/", finfo['linkdst']):
-                        fullpath = finfo['linkdst']
-                    else:
-                        dstlist = finfo['linkdst'].split('/')
-                        srclist = finfo['name'].split('/')
-                        srcpath = srclist[0:-1]
-                        fullpath = re.sub("^{}".format(inpath), "", os.path.normpath(os.path.join(finfo['linkdst'], osfilename)))
-                    finfo['linkdst_fullpath'] = fullpath
-
-                fullpath = re.sub("^{}".format(inpath), "", os.path.realpath(osfilename))
-
-                finfo['othernames'] = {}
-                for f in [fullpath, finfo['linkdst_fullpath'], finfo['linkdst'], finfo['name']]:
-                    if f:
-                        finfo['othernames'][f] = True
-
-                allfiles[finfo['name']] = finfo
-
-        # first pass, set up the basic file map
-        for name in list(allfiles.keys()):
-            finfo = allfiles[name]
-            finfo['othernames'][name] = True
-
-            filemap[name] = finfo['othernames']
-            for oname in finfo['othernames']:
-                filemap[oname] = finfo['othernames']
-
-        # second pass, include second order
-        newfmap = {}
-        count = 0
-        while newfmap != filemap or count > 5:
-            count += 1
-            filemap.update(newfmap)
-            newfmap.update(filemap)
-            for mname in list(newfmap.keys()):
-                for oname in list(newfmap[mname].keys()):
-                    newfmap[oname].update(newfmap[mname])
-
-    except Exception as err:
-        traceback.print_exc()
-        print(str(err))
-        pass
-    finally:
-        #os.fchdir(real_root)
-        #os.chroot('.')
-        pass
-
-    return(filemap, allfiles)
 
 ### Package helpers
 
@@ -706,30 +604,13 @@ def rpm_get_all_packages_from_squashtar(unpackdir, squashtar):
             l = l.strip()
             l = str(l, 'utf-8')
             #l = l.decode('utf8')
-            (name, vers, rel, arch) = re.match('(\S*)\s*(\S*)\s*(\S*)\s*(.*)', l).group(1, 2, 3, 4)
+            (name, vers, rel, arch) = re.match(r'(\S*)\s*(\S*)\s*(\S*)\s*(.*)', l).group(1, 2, 3, 4)
             rpms[name] = {'version':vers, 'release':rel, 'arch':arch}
     except Exception as err:
         print(err.output)
         raise ValueError("could not get package list from RPM database: " + str(err))
 
     return(rpms, rpmdbdir) 
-
-def rpm_get_all_packages(unpackdir):
-    rpms = {}
-    rpmdbdir = rpm_prepdb(unpackdir)
-    try:
-        sout = subprocess.check_output(['rpm', '--dbpath='+rpmdbdir, '--queryformat', '%{NAME} %{VERSION} %{RELEASE} %{ARCH}\n', '-qa'], stderr=subprocess.STDOUT)
-        for l in sout.splitlines():
-            l = l.strip()
-            l = str(l, 'utf-8')
-            #l = l.decode('utf8')
-            (name, vers, rel, arch) = re.match('(\S*)\s*(\S*)\s*(\S*)\s*(.*)', l).group(1, 2, 3, 4)
-            rpms[name] = {'version':vers, 'release':rel, 'arch':arch}
-    except Exception as err:
-        print(err.output)
-        raise ValueError("could not get package list from RPM database: " + str(err))
-
-    return(rpms)
 
 def rpm_get_all_pkgfiles(unpackdir):
     rpmfiles = {}
@@ -825,18 +706,14 @@ def python_prepdb_from_squashtar(unpackdir, squashtar, py_file_regexp):
                     candidate = os.path.dirname(filename)
                     if candidate not in candidates:
                         candidates[candidate] = True
-                        #pymembers.append(tfl.getmember(candidate))
-                        #for pymember in tfl.getmembers():
-                        #    pyfilename = pymember.name
-                        #    if re.match("^{}/".format(candidate), pyfilename):
-                        #        pymembers.append(pymember)
 
             for member in tfl.getmembers():
-                filename = member.name
-                for candidate in candidates.keys():
-                    if filename == candidate or filename.startswith(candidate):
-                        pymembers.append(member)
-                        break
+                if member.isfile() or member.isdir():
+                    filename = member.name
+                    for candidate in candidates.keys():
+                        if filename == candidate or filename.startswith(candidate):
+                            pymembers.append(member)
+                            break
 
             tfl.extractall(path=os.path.join(pytmpdir, "rootfs"), members=pymembers)
         ret = os.path.join(pytmpdir, "rootfs")
@@ -855,9 +732,11 @@ def apk_prepdb_from_squashtar(unpackdir, squashtar):
 
     if not os.path.exists(os.path.join(ret, 'lib', 'apk', 'db', 'installed')):
         with tarfile.open(squashtar, mode='r', format=tarfile.PAX_FORMAT) as tfl:
-            filename = "lib/apk/db/installed"
+            tarfilenames = tfl.getnames()
+            apkdbfile = _search_tarfilenames_for_file(tarfilenames, "lib/apk/db/installed")
+
             apkmembers = []
-            apkmembers.append(tfl.getmember(filename))
+            apkmembers.append(tfl.getmember(apkdbfile))
             tfl.extractall(path=os.path.join(apktmpdir, "rootfs"), members=apkmembers)
         ret = os.path.join(apktmpdir, "rootfs")
 
@@ -879,6 +758,7 @@ def dpkg_prepdb_from_squashtar(unpackdir, squashtar):
             dpkgmembers = []
             for member in tfl.getmembers():
                 filename = member.name
+                filename = re.sub(r"^\./|^/", "", filename)
                 if filename.startswith("var/lib/dpkg") or filename.startswith("usr/share/doc"):
                     dpkgmembers.append(member)
             tfl.extractall(path=os.path.join(dpkgtmpdir, "rootfs"), members=dpkgmembers)
@@ -902,6 +782,7 @@ def rpm_prepdb_from_squashtar(unpackdir, squashtar):
             rpmmembers = []
             for member in tfl.getmembers():
                 filename = member.name
+                filename = re.sub(r"^\./|^/", "", filename)
                 if filename.startswith("var/lib/rpm"):
                     rpmmembers.append(member)
 
@@ -932,80 +813,11 @@ def rpm_prepdb(unpackdir):
 
     return(ret)
 
-def dpkg_get_all_packages_from_squashtar(unpackdir, squashtar):
-    actual_packages = {}
-    all_packages = {}
-    other_packages = {}
-
-    dpkg_db_base_dir = dpkg_prepdb_from_squashtar(unpackdir, squashtar)
-    dpkgdbdir = os.path.join(dpkg_db_base_dir, "var", "lib", "dpkg")
-    dpkgdocsdir = os.path.join(dpkg_db_base_dir, "usr", "share", "doc")
-
-    cmd = ["dpkg-query", "--admindir={}".format(dpkgdbdir), "-W", "-f="+"${Package} ${Version} ${source:Package} ${source:Version} ${Architecture}\\n"]
-    try:
-        sout = subprocess.check_output(cmd)
-        for l in sout.splitlines(True):
-            l = l.strip()
-            l = str(l, 'utf-8')
-            (p, v, sp, sv, arch) = re.match('(\S*)\s*(\S*)\s*(\S*)\s*(\S*)\s*(.*)', l).group(1, 2, 3, 4, 5)
-            if p and v:
-                if p not in actual_packages:
-                    actual_packages[p] = {'version':v, 'arch':arch}
-                if p not in all_packages:
-                    all_packages[p] = {'version':v, 'arch':arch}
-            if sp and sv:
-                if sp not in all_packages:
-                    all_packages[sp] = {'version':sv, 'arch':arch}
-            if p and v and sp and sv:
-                if p == sp and v != sv:
-                    other_packages[p] = [{'version':sv, 'arch':arch}]
-
-    except Exception as err:
-        print("Could not run command: " + str(cmd))
-        print("Exception: " + str(err))
-        print("Please ensure the command 'dpkg' is available and try again")
-        raise err
-
-    ret = (all_packages, actual_packages, other_packages, dpkgdbdir)
-    return(ret)
-
-def dpkg_get_all_packages(unpackdir):
-    actual_packages = {}
-    all_packages = {}
-    other_packages = {}
-    cmd = ["dpkg-query", "--admindir={}".format(unpackdir), "-W", "-f="+"${Package} ${Version} ${source:Package} ${source:Version} ${Architecture}\\n"]
-    try:
-        sout = subprocess.check_output(cmd)
-        for l in sout.splitlines(True):
-            l = l.strip()
-            l = str(l, 'utf-8')
-            (p, v, sp, sv, arch) = re.match('(\S*)\s*(\S*)\s*(\S*)\s*(\S*)\s*(.*)', l).group(1, 2, 3, 4, 5)
-            if p and v:
-                if p not in actual_packages:
-                    actual_packages[p] = {'version':v, 'arch':arch}
-                if p not in all_packages:
-                    all_packages[p] = {'version':v, 'arch':arch}
-            if sp and sv:
-                if sp not in all_packages:
-                    all_packages[sp] = {'version':sv, 'arch':arch}
-            if p and v and sp and sv:
-                if p == sp and v != sv:
-                    other_packages[p] = [{'version':sv, 'arch':arch}]
-
-    except Exception as err:
-        print("Could not run command: " + str(cmd))
-        print("Exception: " + str(err))
-        print("Please ensure the command 'dpkg' is available and try again")
-        raise err
-
-    ret = (all_packages, actual_packages, other_packages)
-    return(ret)
-
-def dpkg_get_all_pkgfiles(unpackdir):
+def dpkg_get_all_pkgfiles_from_squashtar(unpackdir, squashtar):
     allfiles = {}
 
     try:
-        (allpkgs, actpkgs, othpkgs) = dpkg_get_all_packages(unpackdir)    
+        (allpkgs, allpkgs_simple, actpkgs, othpkgs, dpkgdbdir) = dpkg_get_all_packages_detail_from_squashtar(unpackdir, squashtar)
         cmd = ["dpkg-query", "--admindir={}".format(os.path.join(unpackdir)), "-L"] + list(actpkgs.keys())
         sout = subprocess.check_output(cmd)
         for l in sout.splitlines():
@@ -1031,64 +843,109 @@ def dpkg_get_all_packages_detail_from_squashtar(unpackdir, squashtar):
     dpkg_db_base_dir = dpkg_prepdb_from_squashtar(unpackdir, squashtar)
     dpkgdbdir = os.path.join(dpkg_db_base_dir, "var", "lib", "dpkg")
     dpkgdocsdir = os.path.join(dpkg_db_base_dir, "usr", "share", "doc")
+    dpkgstatusddir = os.path.join(dpkg_db_base_dir, "var", "lib", "dpkg", "status.d")
 
-    #cmd = ["dpkg-query", "--admindir={}".format(dpkgdbdir), "-W", "-f="+"${Package}|ANCHORETOK|${Version}|ANCHORETOK|${Architecture}|ANCHORETOK|${Installed-Size}|ANCHORETOK|${source:Package}-${source:Version}|ANCHORETOK|${Maintainer}\\n"]
-    cmd = ["dpkg-query", "--admindir={}".format(dpkgdbdir), "-W", "-f="+"${Package}|ANCHORETOK|${Version}|ANCHORETOK|${Architecture}|ANCHORETOK|${Installed-Size}|ANCHORETOK|${source:Package}|ANCHORETOK|${source:Version}|ANCHORETOK|${Maintainer}\\n"]
+    package_tuples = {}
+    
+    cmd = ["dpkg-query", "--admindir={}".format(dpkgdbdir), "-W", "-f="+"${Package}|ANCHORETOK|${Version}|ANCHORETOK|${Architecture}|ANCHORETOK|${Installed-Size}|ANCHORETOK|${source:Package}|ANCHORETOK|${source:Version}|ANCHORETOK|${Maintainer}|ANCHORETOK|${db:Status-Abbrev}\\n"]
     try:
         sout = subprocess.check_output(cmd)
         for l in sout.splitlines(True):
             l = l.strip()
             l = str(l, 'utf-8')
-            (p, v, arch, rawsize, sp, sv, vendor) = l.split("|ANCHORETOK|")
-            if sp and sv:
-                source = "{}-{}".format(sp, sv)
-            else:
-                source = ""
+            (p, v, arch, rawsize, sp, sv, vendor, status) = l.split("|ANCHORETOK|")
 
-            try:
-                size = str(int(rawsize) * 1000)
-            except:
-                size = str(0)
-            
-            sp = str(sp)
-            sv = str(sv)
-            vendor = str(vendor) + " (maintainer)"
-            arch = str(arch)
-            source = str(source)
-
-            try:
-                licfile = os.path.join(dpkgdocsdir, p, 'copyright')
-                if not os.path.exists(licfile):
-                    lic = "Unknown"
-                else:
-                    lics = deb_copyright_getlics(licfile)
-                    if len(list(lics.keys())) > 0:
-                        lic = ' '.join(lics)
-                    else:
-                        lic = "Unknown"
-            except:
-                lic = "Unknown"
-
-            all_packages[p] = {'version':v, 'release':'N/A', 'arch':arch, 'size':size, 'origin':vendor, 'license':lic, 'sourcepkg':source, 'type':'dpkg'}
-
-            if p and v:
-                if p not in actual_packages:
-                    actual_packages[p] = {'version':v, 'arch':arch}
-                if p not in all_packages_simple:
-                    all_packages_simple[p] = {'version':v, 'arch':arch}
-            if sp and sv:
-                if sp not in all_packages_simple:
-                    all_packages_simple[sp] = {'version':sv, 'arch':arch}
-            if p and v and sp and sv:
-                if p == sp and v != sv:
-                    other_packages[p] = [{'version':sv, 'arch':arch}]
+            if status and not status.startswith("ii"):
+                # skip this package if the status is returned, and is not reporting as explicitly installed (ii*)
+                continue
+            if p not in package_tuples:
+                package_tuples[p] = (p,v,arch,rawsize,sp,sv,vendor,status) 
 
     except Exception as err:
-        import traceback
-        traceback.print_exc()
-        print("Could not run command: " + str(cmd))
-        print("Exception: " + str(err))
-        raise ValueError("Please ensure the command 'dpkg' is available and try again: " + str(err))
+        print("Could not run command: {} - exception: {}".format(str(cmd), err))
+
+    try:
+        # inspect presence and contents of the status.d directory,
+        # which is where distroless container images store information
+        # about dpkg software that is installed
+
+        if os.path.exists(dpkgstatusddir):
+            for f in os.listdir(dpkgstatusddir):
+                with open(os.path.join(dpkgstatusddir, f), 'r') as FH:
+                    p = v = vendor = arch = size = sp = sv = status = None
+                    for line in FH.readlines():
+                        line = line.strip()
+                        try:
+                            (pk, pv) = line.split(":", 1)
+                        except:
+                            pk = pv = None
+
+                        if pk == 'Package':
+                            p = pv.strip()
+                        elif pk == 'Version':
+                            v = pv.strip()
+                        elif pk == 'Maintainer':
+                            vendor = pv.strip()
+                        elif pk == 'Architecture':
+                            arch = pv.strip()
+                        elif pk == 'Installed-Size':
+                            rawsize = pv.strip()
+                        elif pk == 'Source':
+                            sp = pv.strip()
+                    if sp and v:
+                        sv = v
+
+                    if p not in package_tuples:
+                        package_tuples[p] = (p,v,arch,rawsize,sp,sv,vendor,status)
+
+    except Exception as err:
+        print ("Could not parse package metadata from {} - exception: {}".format(dpkgstatusddir, err))
+
+    for package_key in package_tuples.keys():
+        (p, v, arch, rawsize, sp, sv, vendor, status) = package_tuples[package_key]
+
+        if sp and sv:
+            source = "{}-{}".format(sp, sv)
+        else:
+            source = ""
+
+        try:
+            size = str(int(rawsize) * 1000)
+        except:
+            size = str(0)
+
+        sp = str(sp)
+        sv = str(sv)
+        vendor = str(vendor) + " (maintainer)"
+        arch = str(arch)
+        source = str(source)
+
+        try:
+            licfile = os.path.join(dpkgdocsdir, p, 'copyright')
+            if not os.path.exists(licfile):
+                lic = "Unknown"
+            else:
+                lics = deb_copyright_getlics(licfile)
+                if len(list(lics.keys())) > 0:
+                    lic = ' '.join(lics)
+                else:
+                    lic = "Unknown"
+        except:
+            lic = "Unknown"
+
+        all_packages[p] = {'version':v, 'release':'N/A', 'arch':arch, 'size':size, 'origin':vendor, 'license':lic, 'sourcepkg':source, 'type':'dpkg'}
+
+        if p and v:
+            if p not in actual_packages:
+                actual_packages[p] = {'version':v, 'arch':arch}
+            if p not in all_packages_simple:
+                all_packages_simple[p] = {'version':v, 'arch':arch}
+        if sp and sv:
+            if sp not in all_packages_simple:
+                all_packages_simple[sp] = {'version':sv, 'arch':arch}
+        if p and v and sp and sv:
+            if p == sp and v != sv:
+                other_packages[p] = [{'version':sv, 'arch':arch}]
 
     return(all_packages, all_packages_simple, actual_packages, other_packages, dpkgdbdir)
 
@@ -1101,7 +958,7 @@ def deb_copyright_getlics(licfile):
         lictext = FH.read()
         for l in lictext.splitlines():
             l = l.strip()
-            m = re.match("License: (\S*)", l)
+            m = re.match(r"License: (\S*)", l)
             if m:
                 lic = m.group(1)
                 if lic:
@@ -1154,7 +1011,7 @@ def apkg_parse_apkdb(apkdbfh):
                 thefiles = list()
                 thepath = ""
 
-            patt = re.match("(\S):(.*)", l)
+            patt = re.match(r"(\S):(.*)", l)
             if patt:
                 (k, v) = patt.group(1,2)
                 apkg['type'] = "APKG"
@@ -1162,7 +1019,7 @@ def apkg_parse_apkdb(apkdbfh):
                     thename = v
                     apkg['name'] = v
                 elif k == 'V':
-                    vpatt = re.match("(\S*)-(\S*)", v)
+                    vpatt = re.match(r"(\S*)-(\S*)", v)
                     if vpatt:
                         (vers, rel) = vpatt.group(1, 2)
                     else:
@@ -1199,7 +1056,9 @@ def apkg_get_all_pkgfiles_from_squashtar(unpackdir, squashtar):
     ret = {}
     with tarfile.open(squashtar, mode='r', format=tarfile.PAX_FORMAT) as tfl:
         try:
-            member = tfl.getmember("lib/apk/db/installed")
+            tarfilenames = tfl.getnames()
+            apkdbfile = _search_tarfilenames_for_file(tarfilenames, "lib/apk/db/installed")
+            member = tfl.getmember(apkdbfile)
             memberfd = tfl.extractfile(member)
             ret = apkg_parse_apkdb(memberfd)
         except Exception as err:
@@ -1233,7 +1092,7 @@ def gem_parse_meta(gem):
     try:
         for line in gem.splitlines():
             line = line.strip()
-            line = re.sub("\.freeze", "", line)
+            line = re.sub(r"\.freeze", "", line)
 
             # look for the unicode \u{} format and try to convert to something python can use
             try:
@@ -1256,37 +1115,37 @@ def gem_parse_meta(gem):
             except Exception as err:
                 pass
 
-            patt = re.match(".*\.name *= *(.*) *", line)
+            patt = re.match(r".*\.name *= *(.*) *", line)
             if patt:
                 name = json.loads(patt.group(1))
 
-            patt = re.match(".*\.homepage *= *(.*) *", line)
+            patt = re.match(r".*\.homepage *= *(.*) *", line)
             if patt:
                 sourcepkg = json.loads(patt.group(1))
 
-            patt = re.match(".*\.version *= *(.*) *", line)
+            patt = re.match(r".*\.version *= *(.*) *", line)
             if patt:
                 v = json.loads(patt.group(1))
                 latest = v
                 versions.append(latest)
 
-            patt = re.match(".*\.licenses *= *(.*) *", line)
+            patt = re.match(r".*\.licenses *= *(.*) *", line)
             if patt:
-                lstr = re.sub("^\[|\]$", "", patt.group(1)).split(',')
+                lstr = re.sub(r"^\[|\]$", "", patt.group(1)).split(',')
                 for thestr in lstr:
                     thestr = re.sub(' *" *', "", thestr)
                     lics.append(thestr)
 
-            patt = re.match(".*\.authors *= *(.*) *", line)
+            patt = re.match(r".*\.authors *= *(.*) *", line)
             if patt:
-                lstr = re.sub("^\[|\]$", "", patt.group(1)).split(',')
+                lstr = re.sub(r"^\[|\]$", "", patt.group(1)).split(',')
                 for thestr in lstr:
                     thestr = re.sub(' *" *', "", thestr)
                     origins.append(thestr)
 
-            patt = re.match(".*\.files *= *(.*) *", line)
+            patt = re.match(r".*\.files *= *(.*) *", line)
             if patt:
-                lstr = re.sub("^\[|\]$", "", patt.group(1)).split(',')
+                lstr = re.sub(r"^\[|\]$", "", patt.group(1)).split(',')
                 for thestr in lstr:
                     thestr = re.sub(' *" *', "", thestr)
                     rfiles.append(thestr)
@@ -1526,7 +1385,7 @@ def dpkg_get_file_package_metadata_from_squashtar(unpackdir, squashtar):
     try:
         if os.path.exists(metapath):
             for f in os.listdir(metapath):
-                patt = re.match("(.*)\.md5sums", f)
+                patt = re.match(r"(.*)\.md5sums", f)
                 if patt:
                     pkgraw = patt.group(1)
                     patt = re.match("(.*):.*", pkgraw)
@@ -1537,7 +1396,7 @@ def dpkg_get_file_package_metadata_from_squashtar(unpackdir, squashtar):
 
                     metafiles[pkg] = os.path.join(metapath, f)
 
-                patt = re.match("(.*)\.conffiles", f)
+                patt = re.match(r"(.*)\.conffiles", f)
                 if patt:
                     pkgraw = patt.group(1)
                     patt = re.match("(.*):.*", pkgraw)
@@ -1565,7 +1424,7 @@ def dpkg_get_file_package_metadata_from_squashtar(unpackdir, squashtar):
                     try:
                         (csum, fname) = line.split()
                         fname = '/' + fname
-                        fname = re.sub("\/\/", "\/", fname)
+                        fname = re.sub(r"\/\/", r"\/", fname)
 
                         if fname not in result:
                             result[fname] = []
@@ -1665,7 +1524,7 @@ def apk_get_file_package_metadata_from_squashtar(unpackdir, squashtar):
                         elif atype == 'Z':
                             raw_csum = aval
                             fname = '/'.join(['/'+fpath, fname])
-                            therealfile_apk = re.sub("\/+", "/", '/'.join([unpackdir, 'rootfs', fname]))
+                            therealfile_apk = re.sub(r"\/+", "/", '/'.join([unpackdir, 'rootfs', fname]))
                             therealfile_fs = os.path.realpath(therealfile_apk)
                             if therealfile_apk == therealfile_fs:
                                 try:
@@ -1695,63 +1554,6 @@ def apk_get_file_package_metadata_from_squashtar(unpackdir, squashtar):
     return(result)
 
 
-def verify_file_packages(unpackdir, flavor):
-    if flavor == 'RHEL':
-        return(rpm_verify_file_packages(unpackdir))
-    else:
-        return(generic_verify_file_packages(unpackdir))
-            
-def generic_verify_file_packages(unpackdir):
-    return({}, None, "", "", 255)
-
-def rpm_verify_file_packages(unpackdir):
-
-    rootfs = os.path.join(unpackdir, 'rootfs')
-    verify_output = verify_error = ""
-    verify_exitcode = 255
-
-    tmpdbpath = prepdbpath = None
-    try:
-
-        prepdbpath = rpm_prepdb(unpackdir)
-        if not os.path.exists(prepdbpath):
-            raise Exception("no prepdbpath created ("+str(prepdbpath)+")")
-
-        tmpdbpath = os.path.join(rootfs, 'tmprpmdb')
-        shutil.copytree(prepdbpath, tmpdbpath)
-        if not os.path.exists(tmpdbpath):
-            raise Exception("no tmpdbpath created ("+str(tmpdbpath)+")")
-
-    except:
-        if tmpdbpath and os.path.exists(tmpdbpath):
-            shutil.rmtree(tmpdbpath)
-        raise Exception("failed to prep environment for rpm verify - exception: " + str(err))
-
-    try:
-        verify_cmd = 'rpm --root=' + rootfs + ' --dbpath=/tmprpmdb/' + ' --verify -a'
-        pipes = subprocess.Popen(verify_cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        o, e = pipes.communicate()
-        verify_exitcode = pipes.returncode
-        verify_output = str(o, 'utf-8')
-        verify_error = str(e, 'utf-8')
-    except Exception as err:
-        raise ValueError("could not perform verify against RPM database: " + str(err))
-    finally:
-        if os.path.exists(tmpdbpath):
-            shutil.rmtree(tmpdbpath)
-
-    verify_hash = {}
-    for line in verify_output.splitlines():
-        el = line.split()
-        file = el[-1]
-        vresult = el[0]
-        verify_hash[file] = vresult
-
-    return(verify_hash, verify_cmd, verify_output, verify_error, verify_exitcode)
-
-
-
-
 ##### File IO helpers
 
 def read_kvfile_todict(file):
@@ -1764,7 +1566,7 @@ def read_kvfile_todict(file):
             l = l.strip()
             #l = l.strip().decode('utf8')
             if l:
-                (k, v) = re.match('(\S*)\s*(.*)', l).group(1, 2)
+                (k, v) = re.match(r'(\S*)\s*(.*)', l).group(1, 2)
                 k = re.sub("____", " ", k)
                 ret[k] = v
 
@@ -1789,7 +1591,7 @@ def write_kvfile_fromlist(file, list, delim=' '):
     with open(file, 'w') as OFH:
         for l in list:
             for i in range(0,len(l)):
-                l[i] = re.sub("\s", "____", l[i])
+                l[i] = re.sub(r"\s", "____", l[i])
             thestr = delim.join(l) + "\n"
             #thestr = thestr.encode('utf8')
             OFH.write(thestr)
@@ -1801,7 +1603,7 @@ def write_kvfile_fromdict(file, indict):
         for k in list(dict.keys()):
             if not dict[k]:
                 dict[k] = "none"
-            cleank = re.sub("\s+", "____", k)
+            cleank = re.sub(r"\s+", "____", k)
             thestr = ' '.join([cleank, dict[k], '\n'])
             #thestr = thestr.encode('utf8')
             OFH.write(thestr)

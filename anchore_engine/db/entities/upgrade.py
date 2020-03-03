@@ -1,6 +1,6 @@
 import json
 import time
-from sqlalchemy import Column, Integer, String, BigInteger, DateTime
+from sqlalchemy import Column, Integer, String, BigInteger, DateTime, Enum
 
 import anchore_engine.db.entities.common
 import anchore_engine.subsys.object_store.manager
@@ -839,10 +839,34 @@ def db_upgrade_008_009():
             engine.execute(command)
             cmdcount = cmdcount + 1
 
-def db_upgrade_009_010():
+
+def cpe_vulnerability_upgrade_009_010():
     """
-    Runs upgrade on ImageGems and ImageNpms to add the column that was retrofitted for the 0.0.8 upgrade. This function ensures that
-    users that already ran that upgrade end up with a 0.0.9 db that has the same schema.
+    Runs upgrade on CpeVulnerability to create an index using foreign key columns vulnerability_id, namespace_name, severity in that order
+
+    :return:
+    """
+    from anchore_engine.db import session_scope
+
+    engine = anchore_engine.db.entities.common.get_engine()
+
+    exec_commands = [
+        "CREATE INDEX IF NOT EXISTS ix_feed_data_cpe_vulnerabilities_fk on feed_data_cpe_vulnerabilities (vulnerability_id, namespace_name, severity)"
+    ]
+
+    log.err('Creating index ix_feed_data_cpe_vulnerabilities_fk on table feed_data_cpe_vulnerabilities')
+
+    cmdcount = 1
+    for command in exec_commands:
+        log.err("running update operation {} of {}: {}".format(cmdcount, len(exec_commands), command))
+        engine.execute(command)
+        cmdcount = cmdcount + 1
+
+
+def archive_document_upgrade_009_010():
+    """
+    Runs upgrade on LegacyArchiveDocument to add b64_encoded column
+
     :return:
     """
 
@@ -861,6 +885,169 @@ def db_upgrade_009_010():
         cmdcount = cmdcount + 1
 
 
+def db_upgrade_009_010():
+    archive_document_upgrade_009_010()
+    cpe_vulnerability_upgrade_009_010()
+
+
+def registry_name_upgrade_010_011():
+    """
+    Runs upgrade to add the 'registry_name' column to registry credential records
+
+    :return:
+    """
+
+    from anchore_engine.db import session_scope
+
+    engine = anchore_engine.db.entities.common.get_engine()
+
+    new_columns = [
+        {
+            'table_name': 'registries',
+            'columns': [
+                Column('registry_name', String()),
+            ]
+        }
+    ]
+
+    log.err("creating new table columns")
+    for table in new_columns:
+        for column in table['columns']:
+            log.err("creating new column ({}) in table ({})".format(column.name, table.get('table_name', "")))
+            try:
+                cn = column.compile(dialect=engine.dialect)
+                ct = column.type.compile(engine.dialect)
+                engine.execute('ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s' % (table['table_name'], cn, ct))
+            except Exception as e:
+                log.err('failed to perform DB upgrade on {} adding column - exception: {}'.format(table, str(e)))
+                raise Exception('failed to perform DB upgrade on {} adding column - exception: {}'.format(table, str(e)))
+
+    # populate new column
+    rc = engine.execute("UPDATE registries set registry_name=registry where registry_name is null")
+
+def fixed_artifacts_upgrade_010_011():
+    """
+    Runs upgrade to add the 'fix_observed_at' column to fixed_artifacts records
+
+    :return:
+    """
+
+    from anchore_engine.db import session_scope
+
+    engine = anchore_engine.db.entities.common.get_engine()
+
+    new_columns = [
+        {
+            'table_name': 'feed_data_vulnerabilities_fixed_artifacts',
+            'columns': [
+                Column('fix_observed_at', DateTime()),
+            ]
+        }
+    ]
+
+    log.err("creating new table columns")
+    for table in new_columns:
+        for column in table['columns']:
+            log.err("creating new column ({}) in table ({})".format(column.name, table.get('table_name', "")))
+            try:
+                cn = column.compile(dialect=engine.dialect)
+                ct = column.type.compile(engine.dialect)
+                engine.execute('ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s' % (table['table_name'], cn, ct))
+            except Exception as e:
+                log.err('failed to perform DB upgrade on {} adding column - exception: {}'.format(table, str(e)))
+                raise Exception('failed to perform DB upgrade on {} adding column - exception: {}'.format(table, str(e)))
+
+    # populate new column
+    rc = engine.execute("UPDATE feed_data_vulnerabilities_fixed_artifacts set fix_observed_at=updated_at where fix_observed_at is null and version!='None'")
+
+def update_users_010_011():
+    """
+    Upgrade to add column to users table
+    :return:
+    """
+    from anchore_engine.db import session_scope
+    from anchore_engine.db.entities.identity import UserTypes, anchore_uuid
+    from anchore_engine.configuration import localconfig
+
+    engine = anchore_engine.db.entities.common.get_engine()
+
+    new_columns = [
+        {
+            'table_name': 'account_users',
+            'columns': [
+                Column('type', Enum(UserTypes, name='user_types'), nullable=False, default=UserTypes.native),
+                Column('uuid', String, unique=True, nullable=False, default=anchore_uuid, index=True),
+                Column('source', String)
+            ]
+        }
+    ]
+
+    log.err("creating new table columns")
+    for table in new_columns:
+        for column in table['columns']:
+            log.err("creating new column ({}) in table ({})".format(column.name, table.get('table_name', "")))
+            try:
+                cn = column.compile(dialect=engine.dialect)
+                ct = column.type.compile(engine.dialect)
+                engine.execute('ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s' % (table['table_name'], cn, ct))
+            except Exception as e:
+                log.err('failed to perform DB upgrade on {} adding column - exception: {}'.format(table, str(e)))
+                raise Exception('failed to perform DB upgrade on {} adding column - exception: {}'.format(table, str(e)))
+
+    # populate with default for system user
+    rc = engine.execute("UPDATE account_users set type='internal' where username = '%s'" % localconfig.SYSTEM_USERNAME)
+
+    # populate with default for system user
+    rc = engine.execute("UPDATE account_users set type='native' where username <> '%s'" % localconfig.SYSTEM_USERNAME)
+
+    users = engine.execute("SELECT username from account_users where uuid is null")
+    for row in users:
+        username = row['username']
+        rc = engine.execute("UPDATE account_users set uuid='%s' where username='%s'" % (anchore_uuid(), username))
+
+    # Add constraints and index
+    rc = engine.execute("ALTER TABLE account_users ALTER COLUMN uuid set not null")
+    rc = engine.execute("ALTER TABLE account_users ALTER COLUMN type set not null")
+    rc = engine.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_account_users_uuid on account_users (uuid)")
+
+
+def db_upgrade_010_011():
+    registry_name_upgrade_010_011()
+    fixed_artifacts_upgrade_010_011()
+    update_users_010_011()
+
+def db_upgrade_package_size_011_012():
+    """
+    Update the column type for image package size from int to bigint
+    :return:
+    """
+    from anchore_engine.db import session_scope
+
+    engine = anchore_engine.db.entities.common.get_engine()
+
+    # Add constraints and index
+    log.err('Updating image package table size column from int to bigint')
+    rc = engine.execute("ALTER TABLE image_packages ALTER COLUMN size type bigint")
+
+
+def event_type_index_upgrade_011_012():
+    """
+    Runs upgrade to add the 'category' column to events records
+
+    :return:
+    """
+
+    from anchore_engine.db import session_scope
+
+    engine = anchore_engine.db.entities.common.get_engine()
+
+    log.err("creating new column index")
+    engine.execute("CREATE INDEX IF NOT EXISTS ix_type ON events using btree (type)")
+    
+def db_upgrade_011_012():
+    event_type_index_upgrade_011_012()
+    db_upgrade_package_size_011_012()
+
 # Global upgrade definitions. For a given version these will be executed in order of definition here
 # If multiple functions are defined for a version pair, they will be executed in order.
 # If any function raises and exception, the upgrade is failed and halted.
@@ -873,5 +1060,7 @@ upgrade_functions = (
     (('0.0.6', '0.0.7'), [ db_upgrade_006_007 ]),
     (('0.0.7', '0.0.8'), [ db_upgrade_007_008 ]),
     (('0.0.8', '0.0.9'), [ db_upgrade_008_009 ]),
-    (('0.0.9', '0.0.10'), [ db_upgrade_009_010 ])
+    (('0.0.9', '0.0.10'), [ db_upgrade_009_010 ]),
+    (('0.0.10', '0.0.11'), [ db_upgrade_010_011 ]),
+    (('0.0.11', '0.0.12'), [ db_upgrade_011_012 ])
 )

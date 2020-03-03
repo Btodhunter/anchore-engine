@@ -35,6 +35,7 @@ from .entities.identity import Account
 from .entities.identity import AccountUser
 from .entities.identity import UserAccessCredentialTypes
 from .entities.identity import AccessCredential
+from .entities.identity import UserTypes
 
 # Task types
 from .entities.tasks import Task, ArchiveMigrationTask
@@ -58,10 +59,15 @@ from .entities.policy_engine import FilesystemAnalysis
 from .entities.policy_engine import NpmMetadata
 from .entities.policy_engine import GemMetadata
 from .entities.policy_engine import NvdMetadata
+from .entities.policy_engine import NvdV2Metadata
+from .entities.policy_engine import VulnDBMetadata
 from .entities.policy_engine import CpeVulnerability
+from .entities.policy_engine import CpeV2Vulnerability
+from .entities.policy_engine import VulnDBCpe
 from .entities.policy_engine import AnalysisArtifact
 from .entities.policy_engine import ImagePackageManifestEntry
 from .entities.policy_engine import CachedPolicyEvaluation
+from .entities.policy_engine import select_nvd_classes
 
 def Session():
     return get_session()

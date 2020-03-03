@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 import json
@@ -9,6 +10,7 @@ import shutil
 from pkg_resources import resource_filename
 
 from anchore_engine.subsys import logger
+from anchore_engine.db.entities.identity import AccountTypes
 
 DEFAULT_CONFIG = {
     'service_dir': os.path.join("{}".format(os.getenv("HOME", "/tmp/anchoretmp")), ".anchore_engine"),
@@ -27,21 +29,28 @@ DEFAULT_CONFIG = {
     'docker_conn_timeout': 600,
     'allow_awsecr_iam_auto': False,
     'skopeo_global_timeout': 0,
+    'global_client_read_timeout': 0,
+    'global_client_connect_timeout': 0,
+    'user_authentication': {
+        'oauth': {
+            'enabled': False,
+            'default_token_expiration_seconds': 3600
+        },
+        'hashed_passwords': False,
+    },
+    'keys': {},
     'feeds': {
-        'anonymous_user_username': 'anon@ancho.re',
-        'anonymous_user_password': 'pbiU2RYZ2XrmYQ',
         'url': 'https://ancho.re/v1/service/feeds',
-        'client_url': 'https://ancho.re/v1/account/users',
-        'token_url': 'https://ancho.re/oauth/token',
         'connection_timeout_seconds': 3,
         'read_timeout_seconds': 60,
         'selective_sync': {
             'enabled': True,
             'feeds': {
                 'vulnerabilities': True,
-                'packages': True,
-                'nvd': True,
-                'snyk': True
+                'packages': False,
+                'nvdv2': True,
+                'snyk': False,
+                'vulndb': False
             }
         }
     }
@@ -68,19 +77,29 @@ RESERVED_ACCOUNT_NAMES = [
     ADMIN_ACCOUNT_NAME
 ]
 
-PROTECTED_ACCOUNT_NAMES = [
+# Account names that cannot have user modifications
+USER_MOD_PROTECTED_ACCOUNT_NAMES = [
     GLOBAL_RESOURCE_DOMAIN,
     SYSTEM_ACCOUNT_NAME
 ]
 
-PROTECTED_USER_NAMES = [
+# Users that cannot be deleted
+DELETE_PROTECTED_USER_NAMES = [
     SYSTEM_USERNAME,
     ADMIN_USERNAME
 ]
 
+# Accounts that cannot be deleted or disabled
+DELETE_PROTECTED_ACCOUNT_TYPES = [AccountTypes.service, AccountTypes.admin]
+
+# Accounts that cannot have users modified by other users
+USER_MOD_PROTECTED_ACCOUNT_TYPES = [AccountTypes.service]
+
 # Top-level config keys required to be present
 default_required_config_params = {'services': True, 'webhooks': True, 'credentials': True}
 
+CRED_CACHE_TTL = int(os.getenv('ANCHORE_INTERNAL_CRED_CACHE_TTL', 600))
+CRED_CACHE_LOCK_WAIT_SEC = int(os.getenv('ANCHORE_INTERNAL_CRED_CACHE_WAIT_SEC', 3))
 
 def update_merge(base, override):
     if not isinstance(base, dict) or not isinstance(override, dict):
@@ -129,7 +148,7 @@ def load_defaults(configdir=None):
     if not configdir:
         configdir = os.path.join("{}".format(os.getenv("HOME", "/tmp/anchoretmp")), ".anchore_engine")
 
-    localconfig.update(DEFAULT_CONFIG)
+    localconfig.update(copy.deepcopy(DEFAULT_CONFIG))
     localconfig['service_dir'] = configdir
 
     return (localconfig)
@@ -147,10 +166,15 @@ def load_config(configdir=None, configfile=None, validate_params=None):
         raise Exception("config file (" + str(configfile) + ") not found")
     else:
         try:
-            confdata = read_config(configfile=configfile, validate_params=validate_params)
+            confdata = read_config(configfile=configfile)
             update_merge(localconfig, confdata)
         except Exception as err:
             raise err
+
+        try:
+            validate_config(localconfig, validate_params=validate_params)
+        except Exception as err:
+            raise Exception("invalid configuration: details - " + str(err))
 
     # setup service dir
     if not os.path.exists(os.path.join(localconfig['service_dir'])):
@@ -206,7 +230,7 @@ def load_config(configdir=None, configfile=None, validate_params=None):
     return (localconfig)
 
 
-def read_config(configfile=None, validate_params=None):
+def read_config(configfile=None):
     ret = {}
 
     if not configfile or not os.path.exists(configfile):
@@ -250,16 +274,11 @@ def read_config(configfile=None, validate_params=None):
                 else:
                     confbuf = confbufcopy
 
-            confdata = yaml.load(confbuf)
+            confdata = yaml.load(confbuf, Loader=yaml.FullLoader)
             if confdata:
                 ret.update(confdata)
         except Exception as err:
             raise err
-
-    try:
-        validate_config(ret, validate_params=validate_params)
-    except Exception as err:
-        raise Exception("invalid configuration: details - " + str(err))
 
     return (ret)
 
@@ -280,7 +299,7 @@ def validate_config(config, validate_params=None):
     try:
         # ensure there aren't any left over unset variables
         confbuf = json.dumps(config)
-        patt = re.match(".*(\${ANCHORE.*?}).*", confbuf, re.DOTALL)
+        patt = re.match(r".*(\${ANCHORE.*?}).*", confbuf, re.DOTALL)
         if patt:
             raise Exception("variable overrides found in configuration file that are unset ("+str(patt.group(1))+")")
 
@@ -335,12 +354,63 @@ def validate_config(config, validate_params=None):
                 if 'webhooks' not in config or not config['webhooks']:
                     logger.warn("no webhooks defined in configuration file - notifications will be disabled")
 
+        if 'user_authentication' in validate_params and validate_params['user_authentication']:
+            validate_user_auth_config(config)
+
+        if 'keys' in validate_params and validate_params['keys']:
+            validate_key_config(config, required=False)
+
     except Exception as err:
         logger.error(str(err))
         raise err
 
     # raise Exception("TEST")
     return (ret)
+
+
+def validate_user_auth_config(config):
+    """
+    Validate the oauth configuration and keys
+
+    :param config:
+    :return:
+    """
+    if not config.get('user_authentication'):
+        raise Exception('user_authentication property in configuration must be present')
+    else:
+        oconf = config.get('user_authentication').get('oauth')
+
+    if oconf:
+        enabled = oconf.get('enabled')
+        if enabled is not None:
+            if type(enabled) != bool:
+                # Don't do coercion
+                raise Exception('oauth enabled flag must be a bool')
+
+            if enabled:
+                validate_key_config(config, required=True)
+
+                try:
+                    expiration = oconf['default_token_expiration_seconds']
+                    if type(expiration) != int or expiration < 0:
+                        raise TypeError("Expiration must be an integer >= 0")
+                except:
+                    raise Exception('oauth configuration object must contain "default_token_expiration_seconds" value that is an integer >= 0')
+        else:
+            # No oauth section configured
+            pass
+
+
+def validate_key_config(config, required=False):
+    kconf = config.get('keys')
+    if not kconf:
+        if required:
+            raise Exception('keys property in config not set')
+        else:
+            return
+
+    if not (kconf.get('secret') or (kconf.get('public_key_path') and kconf.get('public_key_path'))):
+        raise Exception('keys config must contain either a value for "secret" key or both the "public_key_path" and "private_key_path" set')
 
 
 def get_config():
@@ -356,3 +426,17 @@ def get_versions():
     ret['db_version'] = version.db_version
 
     return (ret)
+
+
+class OauthNotConfiguredError(Exception):
+    """
+    The configuration for the application does not have oauth enabled
+    """
+    pass
+
+
+class InvalidOauthConfigurationError(Exception):
+    """
+    Error when oauth is enabled, but sufficient configuration isn't provided. Typically this means the keys are present
+    """
+    pass

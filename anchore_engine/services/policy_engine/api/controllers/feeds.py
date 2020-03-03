@@ -1,10 +1,11 @@
 from flask import jsonify
 
+from anchore_engine.common.errors import AnchoreError
 from anchore_engine.apis.authorization import get_authorizer, INTERNAL_SERVICE_ALLOWED
-from anchore_engine.clients.services.simplequeue import LeaseAcquisitionFailedError
+from anchore_engine.clients.services.simplequeue import LeaseAcquisitionFailedError, LeaseUnavailableError
 from anchore_engine.common.helpers import make_response_error
 from anchore_engine.services.policy_engine.api.models import FeedMetadata, FeedGroupMetadata
-from anchore_engine.services.policy_engine.engine.feeds import DataFeeds
+from anchore_engine.services.policy_engine.engine.feeds import db, sync
 from anchore_engine.services.policy_engine.engine.tasks import FeedsUpdateTask
 from anchore_engine.subsys import logger as log
 
@@ -18,9 +19,7 @@ def list_feeds(include_counts=False):
     :return:
     """
 
-    f = DataFeeds.instance()
-    meta = f.list_metadata()
-
+    meta = db.get_all_feeds_detached()
     response = []
 
     for feed in meta:
@@ -39,7 +38,7 @@ def list_feeds(include_counts=False):
 
             if include_counts:
                 # Compute count (this is slow)
-                g.record_count = f.records_for(i.name, g.name)
+                g.record_count = sync.DataFeeds.records_for(i.name, g.name)
             else:
                 g.record_count = None
 
@@ -64,12 +63,12 @@ def sync_feeds(sync=True, force_flush=False):
     if sync:
         try:
             result = FeedsUpdateTask.run_feeds_update(force_flush=force_flush)
-        except LeaseAcquisitionFailedError as e:
+        except (LeaseAcquisitionFailedError, LeaseUnavailableError) as e:
             log.exception('Could not acquire lock on feed sync, likely another sync already in progress')
-            return make_response_error('Failed to execute feed sync', in_httpcode=409,
-                                       detail='Could not acquire lock on feed sync, likely another sync already in progress'), 409
+            return make_response_error('Feed sync lock already held', in_httpcode=409,
+                                       details={'error_codes': [AnchoreError.FEED_SYNC_ALREADY_IN_PROGRESS.name], 'message': AnchoreError.FEED_SYNC_ALREADY_IN_PROGRESS.value}), 409
         except Exception as e:
             log.exception('Error executing feed update task')
-            return make_response_error('Failed to execute feed sync due to an internal error', in_httpcode=500), 500
+            return jsonify(make_response_error(e, in_httpcode=500)), 500
 
-    return jsonify(['{}/{}'.format(x[0], x[1]) for x in result]), 200
+    return jsonify(result), 200

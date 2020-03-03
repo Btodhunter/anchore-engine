@@ -3,46 +3,12 @@ Provides a unified abstraction of the ArchivedImage and ArchivedImageDocker tabl
 
 """
 
-from sqlalchemy import desc, and_, or_, func
-from sqlalchemy.orm import load_only, Load, Session, lazyload, raiseload
-import time
+from sqlalchemy import or_, func, and_
+from sqlalchemy.orm import Session, lazyload
 
-from anchore_engine import db
-from anchore_engine.db import ArchivedImage, ArchivedImageDocker, CatalogImage, CatalogImageDocker, session_scope
+from anchore_engine.db import ArchivedImage, ArchivedImageDocker
 from anchore_engine.subsys import logger
 from anchore_engine.utils import epoch_to_rfc3339
-
-
-# def search_archived_images(account: str, digests=None, tags=None, status=None, offset=None, limit=None):
-#     """
-#     Return a list of matching archived image records.
-#
-#     :param account:
-#     :param digests:
-#     :param tags:
-#     :param image_status:
-#     :return: list of ArchivedImage records
-#     """
-#
-#     with session_scope() as session:
-#         qry = session.query(ArchivedImage).filter(ArchivedImage.account==account).order_by(desc(ArchivedImage.last_updated))
-#
-#         if status is not None:
-#             qry = qry.filter(ArchivedImage.status==status)
-#
-#         if digests:
-#             qry = qry.filter(ArchivedImage.imageDigest.in_(digests))
-#
-#         if tags:
-#             qry = qry.filter(ArchivedImage._tags.tag.in_(tags))
-#
-#         if offset:
-#             qry = qry.offset(offset)
-#
-#         if limit:
-#             qry = qry.limit(limit)
-#
-#         return [x.to_json() for x in qry.all()]
 
 
 def summarize(session: Session):
@@ -105,6 +71,11 @@ def update_image_status(session: Session, account: str, image_digest: str, old_s
         return new_status
 
 
+def list(session: Session, account: str):
+    imgs = session.query(ArchivedImage).filter(ArchivedImage.account == account).order_by(ArchivedImage.created_at.desc()).all()
+    return imgs
+
+
 def get(session: Session, account, image_digest):
     result = session.query(ArchivedImage).filter(or_(ArchivedImage.imageDigest==image_digest, ArchivedImage.parentDigest==image_digest), ArchivedImage.account==account).one_or_none()
     return result
@@ -152,7 +123,7 @@ def get_tag_histories(session, account, registries=None, repositories=None, tags
         ArchivedImageDocker.tag_detected_at.desc()
     ]
 
-    qry = session.query(*select_fields).join(ArchivedImage).filter(ArchivedImage.account==account).order_by(*order_by_fields)
+    qry = session.query(*select_fields).join(ArchivedImage, and_(ArchivedImageDocker.account == ArchivedImage.account, ArchivedImageDocker.imageDigest == ArchivedImage.imageDigest)).filter(ArchivedImage.account==account).order_by(*order_by_fields)
 
     for field, filters in [(ArchivedImageDocker.registry, registries), (ArchivedImageDocker.repository, repositories), (ArchivedImageDocker.tag, tags)]:
         if filters:

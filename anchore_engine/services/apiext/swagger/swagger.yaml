@@ -1,7 +1,7 @@
 swagger: "2.0"
 info:
   description: "This is the Anchore Engine API. Provides the primary external API for users of the service."
-  version: "0.1.9"
+  version: "0.1.13"
   title: "Anchore Engine API Server"
   contact:
     email: "nurmi@anchore.com"
@@ -42,6 +42,8 @@ tags:
   description: Manage Accounts, Users, and Credentials
 - name: Identity
   description: Get and operate on the authenticated user's identity
+- name: Archives
+  description: Data Archiving Management
 basePath: "/"
 schemes:
 - "http"
@@ -50,11 +52,7 @@ consumes:
 - application/json
 produces:
 - application/json
-securityDefinitions:
-  basicAuth:
-    type: basic
-security:
-- basicAuth: []
+
 parameters:
   AsAccountParameter:
     name: x-anchore-account
@@ -341,30 +339,6 @@ paths:
           description: Internal Error
           schema:
             $ref: "#/definitions/ApiErrorResponse"
-  /imageimport:
-    post:
-      tags:
-      - Images
-      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.images
-      operationId: import_image
-      x-anchore-authz-action: importImage
-      summary: Import and image analysis directly
-      parameters:
-      - name: analysis_report
-        in: body
-        required: true
-        schema:
-          $ref: "#/definitions/ImageAnalysisReport"
-      - $ref: "#/parameters/AsAccountParameter"
-      responses:
-        200:
-          description: Import task accepted
-          schema:
-            $ref: "#/definitions/AnchoreImageList"
-        500:
-          description: Internal error
-          schema:
-            $ref: "#/definitions/ApiErrorResponse"
   /summaries/imagetags:
     get:
       tags:
@@ -449,6 +423,31 @@ paths:
       responses:
         200:
           description: "successful operation"
+          schema:
+            $ref: "#/definitions/AnchoreImageList"
+        500:
+          description: Internal Error
+          schema:
+            $ref: "#/definitions/ApiErrorResponse"
+  /import/images:
+    post:
+      tags:
+      - Import
+      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.images
+      operationId: import_image_archive
+      x-anchore-authz-action: importImage
+      summary: Import an anchore image tar.gz archive file.
+      consumes:
+        - multipart/form-data
+      parameters:
+        - in: formData
+          name: archive_file
+          type: file
+          description: anchore image tar archive.
+          required: true
+      responses:
+        200:
+          description: Successfully imported image to the engine
           schema:
             $ref: "#/definitions/AnchoreImageList"
         500:
@@ -971,6 +970,66 @@ paths:
           description: Internal error
           schema:
             $ref: "#/definitions/ApiErrorResponse"
+  /images/{imageDigest}/artifacts/retrieved_files:
+    get:
+      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.images
+      operationId: list_retrieved_files
+      x-anchore-authz-action: getImage
+      summary: Return a list of analyzer artifacts of the specified type
+      produces:
+      - application/json
+      parameters:
+      - name: imageDigest
+        in: path
+        type: string
+        required: true
+      responses:
+        200:
+          description: "List of file metadata objects"
+          schema:
+            $ref: "#/definitions/RetrievedFileList"
+        404:
+          description: "Image not found in this service"
+  /images/{imageDigest}/artifacts/file_content_search:
+    get:
+      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.images
+      operationId: list_file_content_search_results
+      x-anchore-authz-action: getImage
+      summary: Return a list of analyzer artifacts of the specified type
+      produces:
+        - application/json
+      parameters:
+        - name: imageDigest
+          in: path
+          type: string
+          required: true
+      responses:
+        200:
+          description: "List of file metadata objects"
+          schema:
+            $ref: "#/definitions/FileContentSearchList"
+        404:
+          description: "Image not found in this service"
+  /images/{imageDigest}/artifacts/secret_search:
+    get:
+      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.images
+      operationId: list_secret_search_results
+      x-anchore-authz-action: getImage
+      summary: Return a list of analyzer artifacts of the specified type
+      produces:
+        - application/json
+      parameters:
+        - name: imageDigest
+          in: path
+          type: string
+          required: true
+      responses:
+        200:
+          description: "List of file metadata objects"
+          schema:
+            $ref: "#/definitions/SecretSearchList"
+        404:
+          description: "Image not found in this service"
   /images/{imageDigest}/metadata:
     get:
       tags:
@@ -1115,6 +1174,7 @@ paths:
         in: path
         required: true
         type: string
+        format: path
       - $ref: "#/parameters/AsAccountParameter"
       responses:
         200:
@@ -1134,6 +1194,7 @@ paths:
         in: path
         required: true
         type: string
+        format: path
       - name: 'validate'
         in: query
         type: boolean
@@ -1167,6 +1228,7 @@ paths:
         in: path
         required: true
         type: string
+        format: path
       - $ref: "#/parameters/AsAccountParameter"
       responses:
         200:
@@ -1252,6 +1314,8 @@ paths:
       responses:
         200:
           description: "Feeds operation success"
+          schema:
+            $ref: "#/definitions/FeedSyncResults"
         500:
           description: Internal Error
           schema:
@@ -1368,6 +1432,37 @@ paths:
             items:
               $ref: "#/definitions/GateSpec"
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.system
+  /system/error_codes:
+    get:
+      summary: Describe anchore engine error codes.
+      description: Describe anchore engine error codes.
+      operationId: describe_error_codes
+      x-anchore-authz-action: None
+      tags:
+      - System
+      responses:
+        200:
+          description: Error Codes Description
+          schema:
+            type: array
+            description: List of Error Code Descriptions
+            items:
+              $ref: "#/definitions/AnchoreErrorCode"
+      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.system
+  /event_types:
+    get:
+      tags:
+      - Events
+      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.events
+      operationId: list_event_types
+      x-anchore-authz-action: listEvents
+      summary: List Event Types
+      description: Returns list of event types in the category hierarchy
+      responses:
+        200:
+          description: List of event types
+          schema:
+            $ref: "#/definitions/EventTypesList"
   /events:
     get:
       tags:
@@ -1388,6 +1483,12 @@ paths:
         type: string
         description: Filter events by the originating host ID
         required: false
+      - name: event_type
+        in: query
+        type: string
+        description: Filter events by a prefix match on the event type (e.g. "user.image.")
+        required: false
+        pattern: '^[a-z0-9-_.*]+$'
       - name: resource_type
         in: query
         type: string
@@ -1629,7 +1730,9 @@ paths:
       - name: id
         in: query
         required: true
-        type: string
+        type: array
+        items:
+          type: string
         description: The ID of the vulnerability (e.g. CVE-1999-0001)
       - name: affected_package
         in: query
@@ -1651,6 +1754,13 @@ paths:
         in: query
         type: integer
         description: Limit the number of records for the requested page. If omitted or set to 0, return all results in a single page
+        required: false
+      - name: namespace
+        in: query
+        type: array
+        items:
+          type: string
+        description: Namespace(s) to filter vulnerability records by
         required: false
       responses:
         200:
@@ -1976,7 +2086,7 @@ paths:
       - Identity
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.accounts
       operationId: get_users_account
-      x-anchore-authz-action: None
+      x-anchore-authz-action: getAccount
       summary: List the account for the authenticated user
       responses:
         200:
@@ -2046,6 +2156,8 @@ paths:
   # Data archives
   /archives:
     get:
+      tags:
+      - Archives
       operationId: list_archives
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
       x-anchore-authz-action: listArchives
@@ -2060,9 +2172,17 @@ paths:
             $ref: "#/definitions/ApiErrorResponse"
   /archives/rules:
     get:
+      tags:
+      - Archives
       operationId: list_analysis_archive_rules
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
-      x-anchore-authz-action: listArchiveTransitions
+      x-anchore-authz-action: listArchiveTransitionRules
+      parameters:
+        - name: system_global
+          in: query
+          required: false
+          type: boolean
+          description: If true include system global rules (owned by admin) even for non-admin users. Defaults to true if not set. Can be set to false to exclude globals
       responses:
         200:
           description: Archive transition rules
@@ -2073,9 +2193,11 @@ paths:
           schema:
             $ref: "#/definitions/ApiErrorResponse"
     post:
+      tags:
+      - Archives
       operationId: create_analysis_archive_rule
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
-      x-anchore-authz-action: createArchiveTransition
+      x-anchore-authz-action: createArchiveTransitionRule
       parameters:
         - name: rule
           in: body
@@ -2093,9 +2215,11 @@ paths:
             $ref: "#/definitions/ApiErrorResponse"
   /archives/rules/{ruleId}:
     get:
+      tags:
+      - Archives
       operationId: get_analysis_archive_rule
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
-      x-anchore-authz-action: getArchiveTransition
+      x-anchore-authz-action: getArchiveTransitionRule
       parameters:
         - name: ruleId
           type: string
@@ -2111,9 +2235,11 @@ paths:
           schema:
             $ref: "#/definitions/ApiErrorResponse"
     delete:
+      tags:
+      - Archives
       operationId: delete_analysis_archive_rule
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
-      x-anchore-authz-action: deleteArchiveTransition
+      x-anchore-authz-action: deleteArchiveTransitionRule
       parameters:
         - name: ruleId
           type: string
@@ -2128,27 +2254,31 @@ paths:
           description: Internal error
           schema:
             $ref: "#/definitions/ApiErrorResponse"
-  /archives/rules/{ruleId}/history:
-    get:
-      operationId: get_analysis_archive_rule_history
-      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
-      x-anchore-authz-action: getArchiveTransitionHistory
-      parameters:
-        - name: ruleId
-          type: string
-          required: true
-          in: path
-      responses:
-        200:
-          description: Archive transition rule history of actions
-          schema:
-            $ref: "#/definitions/AnalysisArchiveTransitionHistory"
-        500:
-          description: Internal error
-          schema:
-            $ref: "#/definitions/ApiErrorResponse"
+#  /archives/rules/{ruleId}/history:
+#    get:
+#      tags:
+#      - Archives
+#      operationId: get_analysis_archive_rule_history
+#      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
+#      x-anchore-authz-action: getArchiveTransitionRuleHistory
+#      parameters:
+#        - name: ruleId
+#          type: string
+#          required: true
+#          in: path
+#      responses:
+#        200:
+#          description: Archive transition rule history of actions
+#          schema:
+#            $ref: "#/definitions/AnalysisArchiveTransitionHistory"
+#        500:
+#          description: Internal error
+#          schema:
+#            $ref: "#/definitions/ApiErrorResponse"
   /archives/images:
     get:
+      tags:
+      - Archives
       operationId: list_analysis_archive
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
       x-anchore-authz-action: listArchivedImageAnalysis
@@ -2162,6 +2292,8 @@ paths:
           schema:
             $ref: "#/definitions/ApiErrorResponse"
     post:
+      tags:
+      - Archives
       operationId: archive_image_analysis
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
       x-anchore-authz-action: createArchivedImageAnalysis
@@ -2182,6 +2314,8 @@ paths:
             $ref: "#/definitions/ApiErrorResponse"
   /archives/images/{imageDigest}:
     get:
+      tags:
+      - Archives
       description: Returns the archive metadata record identifying the image and tags for the analysis in the archive.
       operationId: get_archived_analysis
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
@@ -2202,6 +2336,8 @@ paths:
           schema:
             $ref: "#/definitions/ApiErrorResponse"
     delete:
+      tags:
+      - Archives
       description: Performs a synchronous archive deletion
       operationId: delete_archived_analysis
       x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.archive
@@ -2220,6 +2356,23 @@ paths:
           description: ArchivdImageAnalysis record but with status 'deleted'
           schema:
             $ref: "#/definitions/ArchivedAnalysis"
+        500:
+          description: Internal error
+          schema:
+            $ref: "#/definitions/ApiErrorResponse"
+  /oauth/token:
+    post:
+      x-swagger-router-controller: anchore_engine.services.apiext.api.controllers.oauth
+      operationId: get_oauth_token
+      x-anchore-authz-action: None
+      description: Request a jwt token for subsequent operations, this request is authenticated with normal HTTP auth
+      consumes:
+        - application/x-www-form-urlencoded
+      responses:
+        200:
+          description: Resulting JWT token
+          schema:
+            $ref: "#/definitions/TokenResponse"
         500:
           description: Internal error
           schema:
@@ -2299,6 +2452,10 @@ definitions:
       link:
         type: string
         description: URL for the upstream CVE record in the reporting source (e.g. ubuntu security tracker)
+      nvd_data:
+        $ref: "#/definitions/NvdDataList"
+      vendor_data:
+        $ref: "#/definitions/VendorDataList"
     description: A single vulnerability record in a single namespace, the unique key is the combinatino of the id and namespace
   ImageReference:
     type: object
@@ -2394,10 +2551,11 @@ definitions:
     properties:
       dockerfile:
         type: string
-        description: Content of the dockerfile for the image, if available. Deprecated in favor of the 'source' field.
+        description: Base64 encoded content of the dockerfile for the image, if available. Deprecated in favor of the 'source' field.
+        pattern: "^[a-zA-Z0-9+/=]+$"
       digest:
         type: string
-        description: "A full pullable digest reference for an image. e.g. docker.io/nginx@sha256:abc123. Deprecated in favor of the 'source' field"
+        description: "A digest string for an image, maybe a pull string or just a digest. e.g. nginx@sha256:123 or sha256:abc123. If a pull string, it must have same regisry/repo as the tag field. Deprecated in favor of the 'source' field"
       tag:
         type: string
         description: "Full pullable tag reference for image. e.g. docker.io/nginx:latest. Deprecated in favor of the 'source' field"
@@ -2426,16 +2584,23 @@ definitions:
   RegistryTagSource:
     type: object
     description: An image reference using a tag in a registry, this is the most common source type.
+    required:
+      - pullstring
     properties:
       pullstring:
         type: string
         description: A docker pull string (e.g. docker.io/nginx:latest, or docker.io/nginx@sha256:abd) to retrieve the image
       dockerfile:
         type: string
-        description: Content of the dockerfile used to build the image, if available.
+        description: Base64 encoded content of the dockerfile used to build the image, if available.
+        pattern: "^[a-zA-Z0-9+/=]+$"
   RegistryDigestSource:
     type: object
     description: An image reference using a digest in a registry, includes some extra tag and timestamp info in addition to the pull string to allow proper tag history reconstruction.
+    required:
+      - pullstring
+      - tag
+      - creation_timestamp_override
     properties:
       pullstring:
         type: string
@@ -2449,14 +2614,18 @@ definitions:
         description: Optional override of the image creation time to support proper tag history construction in cases of out-of-order analysis compared to registry history for the tag
       dockerfile:
         type: string
-        description: Content of the dockerfile used to build the image, if available.
+        description: Base64 encoded content of the dockerfile used to build the image, if available.
+        pattern: "^[a-zA-Z0-9+/=]+$"
   AnalysisArchiveSource:
     type: object
     description: An image reference in the analysis archive for the purposes of loading analysis from the archive into th working set
+    required:
+      - digest
     properties:
       digest:
         type: string
         description: The image digest identify the analysis. Archived analyses are based on digest, tag records are restored as analysis is restored.
+        pattern: "^sha256:[a-fA-F0-9]{64}$"
   PolicyBundle:
     description: A bundle containing a set of policies, whitelists, and rules for mapping them to specific images
     type: object
@@ -2755,6 +2924,8 @@ definitions:
         type: string
       userId:
         type: string
+      annotations:
+        type: object
       image_status:
         type: string
         description: State of the image
@@ -3045,7 +3216,10 @@ definitions:
         description: Type of registry
       registry:
         type: string
-        description: hostname:port string for accessing the registry, as would be used in a docker pull operation
+        description: hostname:port string for accessing the registry, as would be used in a docker pull operation. May include some or all of a repository and wildcards (e.g. docker.io/library/* or gcr.io/myproject/myrepository)
+      registry_name:
+        type: string
+        description: human readable name associated with registry record
       registry_verify:
         type: boolean
         description: Use TLS/SSL verification for the registry URL
@@ -3071,6 +3245,9 @@ definitions:
       registry:
         type: string
         description: hostname:port string for accessing the registry, as would be used in a docker pull operation
+      registry_name:
+        type: string
+        description: human readable name associated with registry record
       registry_verify:
         type: boolean
         description: Use TLS/SSL verification for the registry URL
@@ -3113,6 +3290,64 @@ definitions:
       package_path:
         type: string
         description: The location (if applicable) of the vulnerable package in the container filesystem
+      nvd_data:
+        $ref: "#/definitions/NvdDataList"
+      vendor_data:
+        $ref: "#/definitions/VendorDataList"
+  NvdDataList:
+    type: array
+    description: List of Nvd Data objects
+    items:
+      $ref: "#/definitions/NvdDataObject"
+  NvdDataObject:
+    type: object
+    properties:
+      id:
+        type: string
+        description: NVD Vulnerability ID
+      cvss_v2:
+        $ref: "#/definitions/CVSSV2Scores"
+      cvss_v3:
+        $ref: "#/definitions/CVSSV3Scores"
+  VendorDataList:
+    type: array
+    description: List of Vendor Data objects
+    items:
+      $ref: "#/definitions/VendorDataObject"
+  VendorDataObject:
+    type: object
+    properties:
+      id:
+        type: string
+        description: Vendor Vulnerability ID
+      cvss_v2:
+        $ref: "#/definitions/CVSSV2Scores"
+      cvss_v3:
+        $ref: "#/definitions/CVSSV3Scores"
+  CVSSV2Scores:
+    type: object
+    properties:
+      base_score:
+        type: number
+        x-nullable: True
+      exploitability_score:
+        type: number
+        x-nullable: True
+      impact_score:
+        type: number
+        x-nullable: True
+  CVSSV3Scores:
+    type: object
+    properties:
+      base_score:
+        type: number
+        x-nullable: True
+      exploitability_score:
+        type: number
+        x-nullable: True
+      impact_score:
+        type: number
+        x-nullable: True
   VulnerabilityList:
     type: array
     description: List of Vulnerability objects
@@ -3136,6 +3371,16 @@ definitions:
         type: string
       digest:
         type: string
+  AnchoreErrorCode:
+    type: object
+    description: A description of an anchore error code (name, description)
+    properties:
+      name:
+        type: string
+        description: Error code name
+      description:
+        type: string
+        description: Description of the error code 
   GateSpec:
     type: object
     description: A description of the set of gates available in this engine and the triggers and parameters supported
@@ -3286,6 +3531,8 @@ definitions:
                 type: string
           type:
             type: string
+          category:
+            type: string
           level:
             type: string
           message:
@@ -3322,7 +3569,7 @@ definitions:
       name:
         type: string
         description: The account name to use. This will identify the account and must be globally unique in the system.
-        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{1,126}[a-zA-Z0-9]$'
+        pattern: ^[a-zA-Z0-9][a-zA-Z0-9@.!#$+-=^_`~;]{1,126}[a-zA-Z0-9]$
       email:
         type: string
         description: An optional email to associate with the account for contact purposes
@@ -3373,12 +3620,22 @@ definitions:
         description: The status of the account
   User:
     type: object
-    description: A username, password pair that can be used to authenticate with the service as a specific user
+    description: A username for authenticating with one or more types of credentials. User type defines the expected credentials allowed for the user. Native users have passwords, External users have no credential internally. Internal users are service/system users for inter-service communication.
     required:
     - username
     properties:
       username:
         description: The username to authenticate with
+        type: string
+      type:
+        description: The user's type
+        type: string
+        enum:
+          - native
+          - internal
+          - external
+      source:
+        description: If the user is external, this is the source that the user was initialized from. All other user types have this set to null
         type: string
       created_at:
         description: The timestampt the user record was created
@@ -3398,7 +3655,7 @@ definitions:
       username:
         description: The username to create
         type: string
-        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{1,126}[a-zA-Z0-9]$'
+        pattern: ^[a-zA-Z0-9][a-zA-Z0-9@.!#$+-=^_`~;]{1,126}[a-zA-Z0-9]$
       password:
         description: The initial password for the user, must be at least 6 characters, up to 128
         type: string
@@ -3587,6 +3844,15 @@ definitions:
         enum:
           - archive
           - delete
+      system_global:
+        type: boolean
+        description: True if the rule applies to all accounts in the system. This is only available to admin users to update/modify, but all users with permission to list rules can see them
+      created_at:
+        type: string
+        format: date-time
+      last_updated:
+        type: string
+        format: date-time
   AnalysisArchiveTransitionHistory:
     type: object
     description: A rule for auto-archiving image analysis by time and/or tag-history
@@ -3622,3 +3888,163 @@ definitions:
       tag:
         type: string
         description: The tag-only section of a pull string. e.g. with "docker.io/anchore/anchore-engine:latest", this is "latest"
+  FeedSyncResults:
+    description: An array of feed sync summaries representing the result of an explicit feed sync operation
+    type: array
+    items:
+      $ref: "#/definitions/FeedSyncResult"
+  FeedSyncResult:
+    description: The result of a sync of a single feed
+    type: object
+    properties:
+      feed:
+        type: string
+        description: The name of the feed synced
+      status:
+        type: string
+        description: The result of the sync operations, either co
+        enum:
+          - success
+          - failure
+      total_time_seconds:
+        type: number
+        description: The duratin, in seconds, of the sync of the feed, the sum of all the group syncs
+      groups:
+        type: array
+        description: Array of group sync results
+        items:
+          $ref: "#/definitions/GroupSyncResult"
+  GroupSyncResult:
+    type: object
+    properties:
+      group:
+        type: string
+        description: The name of the group
+      status:
+        type: string
+        enum:
+          - success
+          - failure
+      updated_image_count:
+        type: integer
+        description: The number of images updated by the this group sync, across all accounts. This is typically only non-zero for vulnerability feeds which update images' vulnerability results during the sync.
+      updated_record_count:
+        type: integer
+        description: The number of feed data records synced down as either updates or new records
+      total_time_seconds:
+        type: number
+        description: The duration of the group sync in seconds
+  TokenResponse:
+    type: object
+    required:
+      - token
+    properties:
+      token:
+        type: string
+        description: The token content
+  RetrievedFile:
+    type: object
+    description: The retrieved file entry including content (b64 encoded)
+    properties:
+      path:
+        type: string
+      b64_content:
+        type: string
+  RetrievedFileList:
+    type: array
+    description: Simple array of RetrievedFileMetadata objects
+    items:
+      $ref: "#/definitions/RetrievedFile"
+  SecretSearchResult:
+    type: object
+    description: The retrieved file entry including content (b64 encoded)
+    properties:
+      path:
+        type: string
+      matches:
+        type: array
+        items:
+          $ref: "#/definitions/RegexContentMatch"
+  SecretSearchList:
+    type: array
+    description: Simple array of RetrievedFileMetadata objects
+    items:
+      $ref: "#/definitions/SecretSearchResult"
+  FileContentSearchResult:
+    type: object
+    description: The retrieved file entry including content (b64 encoded)
+    properties:
+      path:
+        type: string
+      matches:
+        type: array
+        items:
+          $ref: "#/definitions/RegexContentMatch"
+  FileContentSearchList:
+    type: array
+    description: Simple array of RetrievedFileMetadata objects
+    items:
+      $ref: "#/definitions/FileContentSearchResult"
+  RegexContentMatch:
+    type: object
+    description: Match of a named regex on a file
+    properties:
+      name:
+        type: string
+        description: The name associated with the regular expression
+      regex:
+        type: string
+        description: The regular expression used for the match
+      lines:
+        type: array
+        description: A list of line numbers in the file that matched the regex
+        items:
+          type: integer
+  EventTypesList:
+    type: array
+    description: Array of EventCategory objects
+    items:
+      $ref: "#/definitions/EventCategory"
+  EventCategory:
+    type: object
+    description: A collection of event subcategories
+    properties:
+      category:
+        type: string
+      description:
+        type: string
+      subcategories:
+        type: array
+        items:
+          $ref: "#/definitions/EventSubcategory"
+  EventSubcategory:
+    type: object
+    description: A collection of events related to each other
+    properties:
+      name:
+        type: string
+      description:
+        type: string
+      events:
+        type: array
+        items:
+          $ref: "#/definitions/EventDescription"
+  EventDescription:
+    type: object
+    description: A description of an event type
+    properties:
+      name:
+        type: string
+        description: The event type. The last component of the fully-qualified event_type (category.subcategory.event)
+      type:
+        type: string
+        description: The fully qualified event type as would be seen in the event payload
+      message:
+        type: string
+        description: The message associated with the event type
+      resource_type:
+        type: string
+        description: The type of resource this event is generated from
+
+
+

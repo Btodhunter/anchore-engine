@@ -7,15 +7,24 @@ import os, json
 from anchore_engine.clients.services import internal_client_for
 from anchore_engine.clients.services.catalog import CatalogClient
 from anchore_engine.apis import ApiRequestContextProxy
-from anchore_engine.db import AccountTypes, UserAccessCredentialTypes, session_scope, AccountStates
+from anchore_engine.db import AccountTypes, UserAccessCredentialTypes, session_scope, AccountStates, UserTypes
 from anchore_engine.db.db_accounts import AccountAlreadyExistsError, AccountNotFoundError, InvalidStateError
 from anchore_engine.db.db_account_users import UserAlreadyExistsError, UserNotFoundError
 from anchore_engine.utils import datetime_to_rfc3339
 from anchore_engine.common.helpers import make_response_error
 from anchore_engine.subsys import logger
 from anchore_engine.subsys.identities import manager_factory
-from anchore_engine.apis.authorization import get_authorizer, ParameterBoundValue, ActionBoundPermission, NotificationTypes
-from anchore_engine.configuration.localconfig import ADMIN_USERNAME, SYSTEM_USERNAME, GLOBAL_RESOURCE_DOMAIN, PROTECTED_ACCOUNT_NAMES, RESERVED_ACCOUNT_NAMES, get_config
+from anchore_engine.apis.authorization import get_authorizer, ParameterBoundValue, ActionBoundPermission, NotificationTypes, RequestingAccountValue
+from anchore_engine.configuration.localconfig import (
+    ADMIN_USERNAME,
+    SYSTEM_USERNAME,
+    GLOBAL_RESOURCE_DOMAIN,
+    USER_MOD_PROTECTED_ACCOUNT_NAMES,
+    RESERVED_ACCOUNT_NAMES,
+    get_config,
+    DELETE_PROTECTED_USER_NAMES,
+    DELETE_PROTECTED_ACCOUNT_TYPES
+)
 
 
 authorizer = get_authorizer()
@@ -50,6 +59,8 @@ def user_db_to_msg(user):
 
     return {
         'username': user['username'],
+        'type': user['type'].value,
+        'source': user['source'],
         'created_at': datetime_to_rfc3339(datetime.datetime.utcfromtimestamp(user['created_at'])),
         'last_updated': datetime_to_rfc3339(datetime.datetime.utcfromtimestamp(user['last_updated']))
     }
@@ -85,9 +96,9 @@ def can_delete_user(user):
     :param user:
     :return:
     """
-    if user['username'] in PROTECTED_ACCOUNT_NAMES or \
-        user['account_name'] in PROTECTED_ACCOUNT_NAMES or \
-        user['account']['type'] not in [AccountTypes.user, AccountTypes.admin]:
+    if user['username'] in DELETE_PROTECTED_USER_NAMES or \
+        user['account_name'] in USER_MOD_PROTECTED_ACCOUNT_NAMES or \
+        user['account']['type'] in [AccountTypes.service]:
         return False
     else:
         return True
@@ -99,8 +110,8 @@ def can_delete_account(account):
     :param user:
     :return:
     """
-    if account['name'] in RESERVED_ACCOUNT_NAMES or \
-        account['type'] not in [AccountTypes.user]:
+    if account['name'] in USER_MOD_PROTECTED_ACCOUNT_NAMES or \
+        account['type'] in DELETE_PROTECTED_ACCOUNT_TYPES:
         return False
     else:
         return True
@@ -124,7 +135,7 @@ def verify_user(username, accountname, mgr):
     return usr
 
 
-@authorizer.requires([])
+@authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
 def get_users_account():
     """
     GET /account
@@ -135,7 +146,7 @@ def get_users_account():
     try:
         with session_scope() as session:
             mgr = manager_factory.for_session(session)
-            account = mgr.get_account(ApiRequestContextProxy.identity().user_account)
+            account = mgr.get_account(ApiRequestContextProxy.namespace())
             return account_db_to_msg(account), 200
     except Exception as ex:
         logger.exception('API Error')
@@ -391,7 +402,7 @@ def create_user(accountname, user):
         return make_response_error('Account not found', in_httpcode=404), 404
     except Exception as e:
         logger.exception('API Error')
-        return make_response_error('Internal error deleting account {}'.format(accountname)), 500
+        return make_response_error('Internal error adding user'), 500
 
 
 @authorizer.requires([ActionBoundPermission(domain=ParameterBoundValue('accountname'), target=ParameterBoundValue('username'))])
@@ -408,6 +419,9 @@ def create_user_credential(accountname, username, credential):
         with session_scope() as session:
             mgr = manager_factory.for_session(session)
             user = verify_user(username, accountname, mgr)
+
+            if user['type'] != UserTypes.native:
+                return make_response_error("Users with type other than 'native' cannot have password credentials", in_httpcode=400), 400
 
             # For now, only support passwords via the api
             if credential['type'] != 'password':
@@ -541,7 +555,7 @@ def _init_policy(accountname, config):
     if len(policies) == 0:
         logger.debug("Account {} has no policy bundle - installing default".format(accountname))
 
-        if 'default_bundle_file' in config and os.path.exists(config['default_bundle_file']):
+        if config.get('default_bundle_file', None) and os.path.exists(config['default_bundle_file']):
             logger.info("loading def bundle: " + str(config['default_bundle_file']))
             try:
                 default_bundle = {}

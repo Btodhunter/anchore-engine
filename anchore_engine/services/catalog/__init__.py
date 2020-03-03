@@ -5,8 +5,9 @@ import threading
 import time
 import pkg_resources
 
+from sqlalchemy.exc import IntegrityError
+
 # anchore modules
-import anchore_engine.clients.anchoreio
 import anchore_engine.common.helpers
 import anchore_engine.common.images
 from anchore_engine.clients.services import internal_client_for
@@ -31,7 +32,7 @@ from anchore_engine.service import ApiService, LifeCycleStages
 from anchore_engine.common.helpers import make_policy_record
 from anchore_engine.subsys.identities import manager_factory
 from anchore_engine.services.catalog import archiver
-from anchore_engine.subsys.object_store.config import DEFAULT_OBJECT_STORE_MANAGER_ID, ANALYSIS_ARCHIVE_MANAGER_ID
+from anchore_engine.subsys.object_store.config import DEFAULT_OBJECT_STORE_MANAGER_ID, ANALYSIS_ARCHIVE_MANAGER_ID, ALT_OBJECT_STORE_CONFIG_KEY
 
 ##########################################################
 
@@ -159,7 +160,7 @@ def handle_vulnerability_scan(*args, **kwargs):
             # vulnerability scans
 
             doperform = False
-            vuln_sub_tags = []
+            vuln_subs = []
             for subscription_type in ['vuln_update']:
                 dbfilter = {'subscription_type': subscription_type}
                 with db.session_scope() as dbsession:
@@ -170,16 +171,34 @@ def handle_vulnerability_scan(*args, **kwargs):
                             'subscription_key'], registry_lookup=False, registry_creds=(None, None))
                         dbfilter = {'registry': image_info['registry'], 'repo': image_info['repo'],
                                     'tag': image_info['tag']}
-                        if dbfilter not in vuln_sub_tags:
-                            vuln_sub_tags.append(dbfilter)
+                        if (dbfilter, subscription_record['subscription_value']) not in vuln_subs:
+                            vuln_subs.append((dbfilter, subscription_record['subscription_value']))
 
-            for dbfilter in vuln_sub_tags:
+            for (dbfilter, value) in vuln_subs:
                 with db.session_scope() as dbsession:
                     image_records = db_catalog_image.get_byimagefilter(userId, 'docker', dbfilter=dbfilter,
-                                                                       onlylatest=True, session=dbsession)
+                                                                       onlylatest=False, session=dbsession)
+                if value:
+                    try:
+                        subscription_value = json.loads(value)
+                        digests = set(subscription_value['digests'])
+                    except Exception as err:
+                        digests = set()
+                else:
+                    digests = set()
+
+                # always add latest version of the image
+                if len(image_records) > 0:
+                    digests.add(image_records[0]['imageDigest'])
+                    current_imageDigest = image_records[0]['imageDigest']
+
                 for image_record in image_records:
                     if image_record['analysis_status'] == taskstate.complete_state('analyze'):
                         imageDigest = image_record['imageDigest']
+
+                        if imageDigest not in digests:
+                            continue
+                            
                         fulltag = dbfilter['registry'] + "/" + dbfilter['repo'] + ":" + dbfilter['tag']
 
                         doperform = True
@@ -187,8 +206,7 @@ def handle_vulnerability_scan(*args, **kwargs):
                             logger.debug("calling vuln scan perform: " + str(fulltag) + " : " + str(imageDigest))
                             with db.session_scope() as dbsession:
                                 try:
-                                    rc = catalog_impl.perform_vulnerability_scan(userId, imageDigest, dbsession,
-                                                                                 scantag=fulltag, force_refresh=False)
+                                    rc = catalog_impl.perform_vulnerability_scan(userId, imageDigest, dbsession, scantag=fulltag, force_refresh=False, is_current=(imageDigest==current_imageDigest))
                                 except Exception as err:
                                     logger.warn("vulnerability scan failed - exception: " + str(err))
 
@@ -227,7 +245,7 @@ def handle_service_watcher(*args, **kwargs):
 
         with db.session_scope() as dbsession:
             mgr = manager_factory.for_session(dbsession)
-            userId, password = mgr.get_system_credentials()
+            event_account = anchore_engine.configuration.localconfig.ADMIN_ACCOUNT_NAME
 
             anchore_services = db_services.get_all(session=dbsession)
             # update the global latest service record dict in services.common
@@ -265,18 +283,17 @@ def handle_service_watcher(*args, **kwargs):
                             # NOTE: this is where any service-specific decisions based on the 'status' record could happen - now all services are the same
                             if status['up'] and status['available']:
                                 if time.time() - service['heartbeat'] > max_service_heartbeat_timer:
-                                    logger.warn("no service heartbeat within allowed time period (" + str(
-                                        [service['hostid'], service['base_url']]) + " - disabling service")
+                                    logger.warn("no service heartbeat within allowed time period ({}) for service ({}/{}) - disabling service".format(max_service_heartbeat_timer, service['hostid'], service['servicename']))
                                     service_update_record[
                                         'short_description'] = "no heartbeat from service in ({}) seconds".format(
                                         max_service_heartbeat_timer)
 
                                     # Trigger an event to log the down service
-                                    event = events.ServiceDownEvent(user_id=userId, name=service['servicename'],
-                                                                        host=service['hostid'],
-                                                                        url=service['base_url'],
-                                                                        cause='no heartbeat from service in ({}) seconds'.format(
-                                                                            max_service_orphaned_timer))
+                                    event = events.ServiceDowned(user_id=event_account, name=service['servicename'],
+                                                                 host=service['hostid'],
+                                                                 url=service['base_url'],
+                                                                 cause='no heartbeat from service in ({}) seconds'.format(
+                                                                            max_service_heartbeat_timer))
                                 else:
                                     service_update_record['status'] = True
                                     service_update_record['status_message'] = taskstate.complete_state('service_status')
@@ -288,9 +305,7 @@ def handle_service_watcher(*args, **kwargs):
                                 # handle the down state transitions
                                 if time.time() - service['heartbeat'] > max_service_cleanup_timer:
                                     # remove the service entirely
-                                    logger.warn("no service heartbeat within max allowed time period (" + str(
-                                        [service['hostid'], service['base_url']]) + " - removing service")
-                                    
+                                    logger.warn("no service heartbeat within allowed time period ({}) for service ({}/{}) - removing service".format(max_service_cleanup_timer, service['hostid'], service['servicename']))
                                     try:
                                         # remove the service record from DB
                                         removed_hostid = service['hostid']
@@ -301,18 +316,17 @@ def handle_service_watcher(*args, **kwargs):
                                         service_update_record = None
                                         
                                         # Trigger an event to log the orphaned service, only on transition
-                                        event = events.ServiceRemovedEvent(user_id=userId, name=removed_servicename,
-                                                                           host=removed_hostid,
-                                                                           url=removed_base_url,
-                                                                           cause='no heartbeat from service in ({}) seconds'.format(
+                                        event = events.ServiceRemoved(user_id=event_account, name=removed_servicename,
+                                                                      host=removed_hostid,
+                                                                      url=removed_base_url,
+                                                                      cause='no heartbeat from service in ({}) seconds'.format(
                                                                                max_service_cleanup_timer))
                                     except Exception as err:
-                                        logger.warn("attempt to remove service {}/{} failed - exception: {}".format(err))
+                                        logger.warn("attempt to remove service {}/{} failed - exception: {}".format(service.get('hostid'), service.get('servicename'), err))
                                     
                                 elif time.time() - service['heartbeat'] > max_service_orphaned_timer:
                                     # transition down service to orphaned
-                                    logger.warn("no service heartbeat within max allowed time period (" + str(
-                                        [service['hostid'], service['base_url']]) + " - orphaning service")
+                                    logger.warn("no service heartbeat within allowed time period ({}) for service ({}/{}) - orphaning service".format(max_service_orphaned_timer, service['hostid'], service['servicename']))
                                     service_update_record['status'] = False
                                     service_update_record['status_message'] = taskstate.orphaned_state('service_status')
                                     service_update_record[
@@ -321,10 +335,10 @@ def handle_service_watcher(*args, **kwargs):
 
                                     if service['status_message'] != taskstate.orphaned_state('service_status'): 
                                         # Trigger an event to log the orphaned service, only on transition
-                                        event = events.ServiceOrphanedEvent(user_id=userId, name=service['servicename'],
-                                                                            host=service['hostid'],
-                                                                            url=service['base_url'],
-                                                                            cause='no heartbeat from service in ({}) seconds'.format(
+                                        event = events.ServiceOrphaned(user_id=event_account, name=service['servicename'],
+                                                                       host=service['hostid'],
+                                                                       url=service['base_url'],
+                                                                       cause='no heartbeat from service in ({}) seconds'.format(
                                                                                 max_service_orphaned_timer))
 
                         except Exception as err:
@@ -341,7 +355,7 @@ def handle_service_watcher(*args, **kwargs):
                             service_update_record['short_description'] = "could not get service status"
                     finally:
                         if event:
-                            _add_event(event)
+                            catalog_impl.add_event(event, dbsession)
 
                 if service_update_record:
                     service.update(service_update_record)
@@ -415,8 +429,8 @@ def handle_repo_watcher(*args, **kwargs):
                 try:
                     curr_repotags = docker_registry.get_repo_tags(userId, image_info, registry_creds=registry_creds)
                 except AnchoreException as e:
-                    event = events.ListTagsFail(user_id=userId, registry=image_info.get('registry', None),
-                                                repository=image_info.get('repo', None), error=e.to_dict())
+                    event = events.ListTagsFailed(user_id=userId, registry=image_info.get('registry', None),
+                                                  repository=image_info.get('repo', None), error=e.to_dict())
                     raise e
 
                 autosubscribes = ['analysis_update']
@@ -432,9 +446,14 @@ def handle_repo_watcher(*args, **kwargs):
                         try:
                             fulltag = image_info['registry'] + "/" + image_info['repo'] + ":" + repotag
                             logger.debug("found new tag in repo: " + str(fulltag))
-                            new_image_info = anchore_engine.common.images.get_image_info(userId, "docker", fulltag,
-                                                                                         registry_lookup=True,
-                                                                                         registry_creds=registry_creds)
+                            try:
+                                new_image_info = anchore_engine.common.images.get_image_info(userId, "docker", fulltag,
+                                                                                             registry_lookup=True,
+                                                                                             registry_creds=registry_creds)
+                            except Exception as err:
+                                event = events.ImageRegistryLookupFailed(user_id=userId, image_pull_string=fulltag, data=err.__dict__)
+                                raise err
+
                             manifest = None
                             try:
                                 if 'manifest' in new_image_info:
@@ -447,7 +466,7 @@ def handle_repo_watcher(*args, **kwargs):
                                 else:
                                     raise TagManifestNotFoundError(tag=fulltag, msg='No manifest from get_image_info')
                             except AnchoreException as e:
-                                event = events.TagManifestParseFail(user_id=userId, tag=fulltag, error=e.to_dict())
+                                event = events.TagManifestParseFailed(user_id=userId, tag=fulltag, error=e.to_dict())
                                 raise
 
                             with db.session_scope() as dbsession:
@@ -491,7 +510,8 @@ def handle_repo_watcher(*args, **kwargs):
                 logger.warn("failed to process repo_update subscription - exception: " + str(err))
             finally:
                 if event:
-                    _add_event(event)
+                    with db.session_scope() as dbsession:
+                        catalog_impl.add_event(event, dbsession)
 
     logger.debug("FIRING DONE: " + str(watcher))
     try:
@@ -567,9 +587,13 @@ def handle_image_watcher(*args, **kwargs):
             try:
                 logger.debug("checking image latest info from registry: " + fulltag)
 
-                image_info = anchore_engine.common.images.get_image_info(userId, "docker", fulltag,
-                                                                         registry_lookup=True,
-                                                                         registry_creds=registry_creds)
+                try:
+                    image_info = anchore_engine.common.images.get_image_info(userId, "docker", fulltag,
+                                                                             registry_lookup=True,
+                                                                             registry_creds=registry_creds)
+                except Exception as err:
+                    event = events.ImageRegistryLookupFailed(user_id=userId, image_pull_string=fulltag, data=err.__dict__)
+                    raise err
                 logger.spew("checking image: got registry info: " + str(image_info))
 
                 manifest = None
@@ -583,8 +607,10 @@ def handle_image_watcher(*args, **kwargs):
                     else:
                         raise TagManifestNotFoundError(tag=fulltag, msg='No manifest from get_image_info')
                 except AnchoreException as e:
-                    event = events.TagManifestParseFail(user_id=userId, tag=fulltag, error=e.to_dict())
+                    event = events.TagManifestParseFailed(user_id=userId, tag=fulltag, error=e.to_dict())
                     raise
+
+                parent_manifest = json.dumps(image_info.get('parentmanifest', {}))
 
                 try:
                     dbfilter = {
@@ -603,6 +629,14 @@ def handle_image_watcher(*args, **kwargs):
                 except Exception as err:
                     logger.debug("found empty/invalid stored manifest, storing new: " + str(err))
                     rc = obj_mgr.put_document(userId, 'manifest_data', image_info['digest'], manifest)
+
+                try:
+                    stored_parent_manifest = json.loads(obj_mgr.get_document(userId, 'parent_manifest_data', image_info['digest']))
+                    if not stored_parent_manifest:
+                        raise Exception("stored parent manifest is empty")
+                except Exception as err:
+                    logger.debug("found empty/invalid stored parent manifest, storing new: " + str(err))
+                    rc = obj_mgr.put_document(userId, 'parent_manifest_data', image_info['digest'], parent_manifest)
 
                 logger.debug("checking image: looking up image in db using dbfilter: " + str(dbfilter))
                 with db.session_scope() as dbsession:
@@ -654,6 +688,7 @@ def handle_image_watcher(*args, **kwargs):
                                                                          digests=[image_info['fulldigest']],
                                                                          parentdigest=image_info.get('parentdigest', None),
                                                                          manifest=manifest,
+                                                                         parent_manifest=parent_manifest,
                                                                          annotations=last_annotations)
 
                     if image_records:
@@ -695,7 +730,8 @@ def handle_image_watcher(*args, **kwargs):
                 logger.error("failed to check/update image - exception: " + str(err))
             finally:
                 if event:
-                    _add_event(event)
+                    with db.session_scope() as dbsession:
+                        catalog_impl.add_event(event, dbsession)
 
     logger.debug("FIRING DONE: " + str(watcher))
     try:
@@ -711,22 +747,6 @@ def handle_image_watcher(*args, **kwargs):
                                                       function=watcher, status="fail")
 
     return (True)
-
-
-def _add_event(event, quiet=True):
-    try:
-        with db.session_scope() as dbsession:
-            db_events.add(event.to_dict(), dbsession)
-
-        logger.debug("queueing event creation notification")
-        npayload = {'event': event.to_dict()}
-        rc = notifications.queue_notification(event.user_id, subscription_key=event.level,
-                                              subscription_type='event_log', payload=npayload)
-    except:
-        if quiet:
-            logger.exception('Ignoring error creating/notifying event: {}'.format(event))
-        else:
-            raise
 
 
 def check_feedmeta_update(dbsession):
@@ -795,7 +815,7 @@ def handle_policyeval(*args, **kwargs):
             # policy evaluations
 
             doperform = False
-            policy_sub_tags = []
+            policy_subs = []
             for subscription_type in ['policy_eval']:
                 dbfilter = {'subscription_type': subscription_type}
                 with db.session_scope() as dbsession:
@@ -806,16 +826,32 @@ def handle_policyeval(*args, **kwargs):
                             'subscription_key'], registry_lookup=False, registry_creds=(None, None))
                         dbfilter = {'registry': image_info['registry'], 'repo': image_info['repo'],
                                     'tag': image_info['tag']}
-                        if dbfilter not in policy_sub_tags:
-                            policy_sub_tags.append(dbfilter)
+                        if (dbfilter, subscription_record['subscription_value']) not in policy_subs:
+                            policy_subs.append((dbfilter, subscription_record['subscription_value']))
 
-            for dbfilter in policy_sub_tags:
+            for (dbfilter, value) in policy_subs:
                 with db.session_scope() as dbsession:
                     image_records = db_catalog_image.get_byimagefilter(userId, 'docker', dbfilter=dbfilter,
-                                                                       onlylatest=True, session=dbsession)
+                                                                       onlylatest=False, session=dbsession)
+                if value:
+                    try:
+                        subscription_value = json.loads(value)
+                        digests = set(subscription_value['digests'])
+                    except Exception as err:
+                        digests = set()
+                else:
+                    digests = set()
+
+                # always add latest version of the image
+                if len(image_records) > 0:
+                    digests.add(image_records[0]['imageDigest'])
                 for image_record in image_records:
                     if image_record['analysis_status'] == taskstate.complete_state('analyze'):
                         imageDigest = image_record['imageDigest']
+
+                        if imageDigest not in digests:
+                            continue
+
                         fulltag = dbfilter['registry'] + "/" + dbfilter['repo'] + ":" + dbfilter['tag']
 
                         # TODO - checks to avoid performing eval if nothing has changed
@@ -931,10 +967,17 @@ def handle_analyzer_queue(*args, **kwargs):
                         logger.debug("failed to get manifest - {}".format(str(err)))
                         manifest = {}
 
+                    try:
+                        parent_manifest = obj_mgr.get_document(userId, 'parent_manifest_data', image_record['imageDigest'])
+                    except Exception as err:
+                        parent_manifest = {}                        
+
                     qobj = {}
                     qobj['userId'] = userId
                     qobj['imageDigest'] = image_record['imageDigest']
                     qobj['manifest'] = manifest
+                    qobj['parent_manifest'] = parent_manifest
+
                     try:
                         if not q_client.is_inqueue('images_to_analyze', qobj):
                             # queue image for analysis
@@ -982,6 +1025,7 @@ def handle_notifications(*args, **kwargs):
     with db.session_scope() as dbsession:
         mgr = manager_factory.for_session(dbsession)
         localconfig = anchore_engine.configuration.localconfig.get_config()
+
         try:
             notification_timeout = int(localconfig['webhooks']['notification_retry_timeout'])
         except:
@@ -1033,29 +1077,43 @@ def handle_notifications(*args, **kwargs):
                         try:
                             if userId == account['name']:
                                 notification_record = None
-                                if subscription_type in anchore_engine.common.subscription_types:
-                                    dbfilter = {'subscription_type': subscription_type,
-                                                'subscription_key': subscription_key}
+
+                                # new handling
+                                subscription_type_actual = subscription_type
+
+                                if notification.get('event', {}).get('details', {}).get('subscription_type', None) in anchore_engine.common.subscription_types:
+                                    subscription_type_actual = notification.get('event', {}).get('details', {}).get('subscription_type')
+                                    subscription_key_actual = notification.get('event', {}).get('resource', {}).get('id')
+                                    dbfilter = {
+                                        'subscription_type': subscription_type_actual,
+                                        'subscription_key': subscription_key_actual,
+                                    }
                                     subscription_records = db_subscriptions.get_byfilter(account['name'],
                                                                                          session=dbsession, **dbfilter)
                                     if subscription_records:
                                         subscription = subscription_records[0]
                                         if subscription and subscription['active']:
+                                            notification_transform = {
+                                                'notificationId': notification.get('notificationId'),
+                                                'userId': notification.get('userId'),
+                                                'subscription_key': subscription_key_actual,
+                                            }
+                                            notification_transform.update(notification.get('event', {}).get('details', {}))
                                             notification_record = notifications.make_notification(account,
-                                                                                                  subscription_type,
-                                                                                                  notification)
-                                elif subscription_type == event_log_type:  # handle event_log differently since its not a type of subscriptions
+                                                                                                  subscription_type_actual,
+                                                                                                  notification_transform)
+
+                                else:
                                     if notify_events and (
                                             event_levels is None or subscription_key.lower() in event_levels):
                                         notification.pop('subscription_key',
                                                          None)  # remove subscription_key property from notification
                                         notification_record = notifications.make_notification(account, subscription_type,
-                                                                                              notification)
-
+                                                                                                  notification)                                            
                                 if notification_record:
-                                    logger.spew("Storing NOTIFICATION: " + str(account) + str(notification_record))
-                                    db_queues.add(subscription_type, userId, notificationId, notification_record, 0,
-                                                  int(time.time() + notification_timeout), session=dbsession)
+                                    logger.spew("Storing NOTIFICATION: {} - {} - {}".format(account, notification_record, subscription_type))
+                                    db_queues.add(subscription_type_actual, userId, notificationId, notification_record, 0,
+                                                      int(time.time() + notification_timeout), session=dbsession)
                         except Exception as err:
                             import traceback
                             traceback.print_exc()
@@ -1066,7 +1124,7 @@ def handle_notifications(*args, **kwargs):
             for account in accounts:
                 notification_records = db_queues.get_all(subscription_type, account['name'], session=dbsession)
                 for notification_record in notification_records:
-                    logger.debug("drained to send: " + json.dumps(notification_record))
+                    logger.spew("drained to send: " + json.dumps(notification_record))
                     try:
                         rc = notifications.notify(account, notification_record)
                         if rc:
@@ -1154,50 +1212,35 @@ def handle_archive_tasks(*args, **kwargs):
     :param kwargs:
     :return:
     """
-    cycle_timer = kwargs['mythread']['cycle_timer']
-    queuename = 'archive_tasks'
+    watcher = str(kwargs['mythread']['taskType'])
+    handler_success = True
 
-    while True:
-        # q_client = internal_client_for(SimpleQueueClient, userId=None)
-        # msg = q_client.dequeue(queuename)
-        # while msg is not None:
-        #     logger.info('Working on task {}'.format(msg))
-        #
-        #
-        #
-        #     if t:
-        #         try:
-        #             t.initiated = datetime.datetime.fromisoformat(task_msg['initiated'])
-        #             t.run()
-        #         except Exception as ex:
-        #             logger.exception('Exception caught in execution of archive task: {}'.format(task_msg))
-        #     else:
-        #         logger.error('Unsupported message type: {}. Dropping message'.format(task_msg['type']))
-        #
-        #     q_client.delete_message(queuename, task_msg['receipt_handle'])
-        #     msg = q_client.dequeue(queuename)
+    start_time = time.time()
+    logger.debug("FIRING: " + str(watcher))
+    task_id = None
+    try:
+        logger.info('Starting analysis archive transition rule processor')
+        with db.session_scope() as session:
+            # Get accounts that have rules
+            accounts = session.query(ArchiveTransitionRule.account).distinct(ArchiveTransitionRule.account).all()
+            if accounts:
+                accounts = [x[0] for x in accounts]
+            logger.debug('Found accounts {} with transition rules'.format(accounts))
 
-        try:
-            with db.session_scope() as session:
-                # Get accounts that have rules
-                accounts = session.query(ArchiveTransitionRule.account).distinct(ArchiveTransitionRule.account).all()
-                if accounts:
-                    accounts = [x[0] for x in accounts]
-                logger.debug('Found accounts {} with transition rules'.format(accounts))
+        for account in accounts:
+            task = archiver.ArchiveTransitionTask(account)
+            task_id = task.task_id
+            logger.info('Starting archive transition task {} for account {}'.format(task.task_id, account))
+            task.run()
+            logger.info('Archive transition task {} complete'.format(task.task_id))
 
-            for account in accounts:
-                logger.debug('Processing archive transition rules for account {}'.format(account))
+    except Exception as ex:
+        logger.exception('Caught unexpected exception')
+    finally:
+        logger.debug('Analysis archive task {} execution time: {} seconds'.format(task_id, time.time() - start_time))
+        logger.debug('Sleeping until next cycle since no messages to process')
 
-                task = archiver.ArchiveTransitionTask(account)
-                logger.info('Starting archive transition task {}'.format(task.task_id))
-                task.run()
-                logger.info('Archive transition task {} complete'.format(task.task_id))
-
-        except Exception as ex:
-            logger.exception('Caught unexpected exception')
-        finally:
-            logger.debug('Sleeping until next cycle since no messages to process')
-            time.sleep(cycle_timer)
+    return True
 
 
 click = 0
@@ -1222,7 +1265,7 @@ def watcher_func(*args, **kwargs):
             logger.info("simplequeue service not yet ready, will retry")
         else:
             q_client = internal_client_for(SimpleQueueClient, userId=None)
-
+            lease_id = None
             try:
                 logger.debug("attempting dequeue")
                 qobj = q_client.dequeue('watcher_tasks', max_wait_seconds=30)
@@ -1244,11 +1287,13 @@ def watcher_func(*args, **kwargs):
                             'No task lease defined for watcher {}, initiating without lock protection'.format(watcher))
                         rc = handler(*args, **kwargs)
                     else:
-                        rc = simplequeue.run_target_with_lease(system_user_auth, lease_id, handler,
+                        rc = simplequeue.run_target_with_lease(None, lease_id, handler,
                                                                ttl=default_lease_ttl, *args, **kwargs)
 
                 else:
                     logger.debug("nothing in queue")
+            except (simplequeue.LeaseAcquisitionFailedError, simplequeue.LeaseUnavailableError) as e:
+                logger.debug('Lease acquisition could not complete, but this is probably due to another process with the lease: {}'.format(e))
             except Exception as err:
                 logger.warn("failed to process task this cycle: " + str(err))
         logger.debug("generic watcher done")
@@ -1310,6 +1355,9 @@ def monitor_func(**kwargs):
                         config_cycle_timer = int(kwargs['cycle_timers'][watcher])
                         if config_cycle_timer < 0:
                             the_cycle_timer = abs(int(config_cycle_timer))
+                        elif config_cycle_timer == 0:
+                            watchers[watcher]['enabled'] = False
+                            logger.debug("watcher '{}' has been explicitly disabled in config".format(watcher))
                         elif config_cycle_timer < min_cycle_timer:
                             logger.warn("configured cycle timer for handler (" + str(
                                 watcher) + ") is less than the allowed min (" + str(
@@ -1330,24 +1378,25 @@ def monitor_func(**kwargs):
 
                 watchers[watcher]['initialized'] = True
 
-            if watcher not in watcher_threads:
-                if watchers[watcher]['taskType']:
-                    # spin up a generic task watcher
-                    logger.debug("starting generic task thread")
-                    watcher_threads[watcher] = threading.Thread(target=watcher_func, args=[watcher], kwargs={})
-                    watcher_threads[watcher].start()
-                else:
-                    # spin up a specific looping watcher thread
-                    watcher_threads[watcher] = threading.Thread(target=watchers[watcher]['handler'],
-                                                                args=watchers[watcher]['args'],
-                                                                kwargs={'mythread': watchers[watcher]})
-                    watcher_threads[watcher].start()
+            if watchers[watcher].get('enabled', True):
+                if watcher not in watcher_threads:
+                    if watchers[watcher]['taskType']:
+                        # spin up a generic task watcher
+                        logger.debug("starting generic task thread")
+                        watcher_threads[watcher] = threading.Thread(target=watcher_func, args=[watcher], kwargs={})
+                        watcher_threads[watcher].start()
+                    else:
+                        # spin up a specific looping watcher thread
+                        watcher_threads[watcher] = threading.Thread(target=watchers[watcher]['handler'],
+                                                                    args=watchers[watcher]['args'],
+                                                                    kwargs={'mythread': watchers[watcher]})
+                        watcher_threads[watcher].start()
 
-            all_ready = anchore_engine.clients.services.common.check_services_ready(['simplequeue'])
-            if not all_ready:
-                logger.info("simplequeue service not yet ready, will retry")
-            elif time.time() - watchers[watcher]['last_queued'] > watchers[watcher]['cycle_timer']:
-                rc = schedule_watcher(watcher)
+                all_ready = anchore_engine.clients.services.common.check_services_ready(['simplequeue'])
+                if not all_ready:
+                    logger.info("simplequeue service not yet ready, will retry")
+                elif time.time() - watchers[watcher]['last_queued'] > watchers[watcher]['cycle_timer']:
+                    rc = schedule_watcher(watcher)
 
     except Exception as err:
         logger.error(str(err))
@@ -1399,10 +1448,10 @@ class CatalogService(ApiService):
 
         self.register_handler(LifeCycleStages.post_db, self._init_object_storage, {})
         self.register_handler(LifeCycleStages.post_register, self._init_policies, {})
-
+        
     def _init_object_storage(self):
         try:
-            did_init = object_store.initialize(self.configuration, manager_id=DEFAULT_OBJECT_STORE_MANAGER_ID, config_keys=[DEFAULT_OBJECT_STORE_MANAGER_ID], allow_legacy_fallback=True)
+            did_init = object_store.initialize(self.configuration, manager_id=DEFAULT_OBJECT_STORE_MANAGER_ID, config_keys=[DEFAULT_OBJECT_STORE_MANAGER_ID, ALT_OBJECT_STORE_CONFIG_KEY], allow_legacy_fallback=True)
             if not did_init:
                 logger.warn('Unexpectedly found the object store already initialized. This is not an expected condition. Continuting with driver: {}'.format(object_store.get_manager().primary_client.__config_name__))
         except Exception as err:
@@ -1435,7 +1484,7 @@ class CatalogService(ApiService):
                         logger.debug("Account {} has no policy bundle - installing default".format(userId))
 
                         config = self.global_configuration
-                        if 'default_bundle_file' in config and os.path.exists(config['default_bundle_file']):
+                        if config.get('default_bundle_file', None) and os.path.exists(config['default_bundle_file']):
                             logger.info("loading def bundle: " + str(config['default_bundle_file']))
                             try:
                                 default_bundle = {}
@@ -1450,9 +1499,15 @@ class CatalogService(ApiService):
                                     if not rc:
                                         raise Exception("policy bundle DB add failed")
                             except Exception as err:
-                                logger.error("could not load up default bundle for user - exception: " + str(err))
+                                if isinstance(err, IntegrityError):
+                                    logger.warn("another process has already initialized, continuing")
+                                else:
+                                    logger.error("could not load up default bundle for user - exception: " + str(err))
                 except Exception as err:
-                    raise Exception("unable to initialize default user data - exception: " + str(err))
+                    if isinstance(err, IntegrityError):
+                        logger.warn("another process has already initialized, continuing")
+                    else:
+                        raise Exception("unable to initialize default user data - exception: " + str(err))
 
 
 watchers = {
@@ -1489,8 +1544,8 @@ watchers = {
     'handle_metrics': {'handler': handle_metrics, 'task_lease_id': False, 'taskType': None, 'args': [],
                        'cycle_timer': 60, 'min_cycle_timer': 60, 'max_cycle_timer': 60, 'last_queued': 0,
                        'last_return': False, 'initialized': False},
-    'archive_tasks': {'handler': handle_archive_tasks, 'task_lease_id': False, 'taskType': None, 'args': [], 'cycle_timer': 30,
-                           'min_cycle_timer': 10, 'max_cycle_timer': 60, 'last_queued': 0, 'last_return': False,
+    'archive_tasks': {'handler': handle_archive_tasks, 'task_lease_id': 'archive_transitions', 'taskType': 'handle_archive_tasks', 'args': [], 'cycle_timer': 43200,
+                           'min_cycle_timer': 60, 'max_cycle_timer': 86400 * 5, 'last_queued': 0, 'last_return': False,
                            'initialized': False},
 }
 

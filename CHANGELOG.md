@@ -1,5 +1,120 @@
 # Changelog
 
+## 0.6.1 (2020-1-30)
++ Improved - Substantial updates to feed sync process in policy engine service to increate transparency in the process, show incremental updates, and use much less memory during the sync. Fixes #284
++ Improved - Adds commented out defaults in docker-compose.yaml embedded in image to easily support starting prometheus and a swagger ui sidecar for API browsing.
++ Improved - Adds backoff/retry in analyzer task flow for loads to policy engine to handle transient failures. Fixes #322.
++ Improved - Dependency updates
++ Fix - Adds the release component of package version for rpms in package listing of OS packages in API responses. Fixes #320.
++ Fix - Removes the embedded swagger ui to keep image smaller and less dependencies with reduced security surface. Uses a side-card model instead with another container for the UI if browsing the API is desired. Fixes #323.
++ Minor bug fixes and improvements
+
+## 0.6.0 (2019-12-13)
+
++ Added - Substantial updates to event subsystem, adding new many new info and error level event types and implementation.
++ Added - Auth toggle for prometheus metrics routes (using disable_auth in metrics section of config.yaml).
++ Added - Group API metrics by function name instead of URI to handle the large number of routes when using Ids in the route.
++ Fix - Change the db column type for the image_packages.size column from int -> bigint for larger packages than 2GB. Fixes #239.
++ Improved - Improvements in vuln listing for an image and vuln query performance. Resolves #286.
++ Improved - Introduce retries for individual feed group syncs and introduce more granular feed sync events to better track sync progress.
++ Improved - Quickstart/initial install via docker-compose now uses pre-loaded vulnerability data (preload DB) to reduce initial feed sync.
++ Improved - Moves deprecated gates/triggers to the EOL lifecycle stage. Resolves #276.
++ Minor bug fixes and improvements in error/eventing subsytems, and performance for NVD related vulnerability syncs and scans
+
+## 0.5.2 (2019-11-15)
+
++ Fix - Remove failing (deprecated) code block from periodic vulnerability scan - Fixes #294
++ Fix - Address issue where the gate is incorrectly triggering when params are meant to filter by filename or content regex name.  Fixes #290.
+
+## 0.5.1 (2019-10-10)
+
++ Added - Array support for the id param in /query/vulnerabilities and a namespace parameter for same route. Fixes #278.
++ Added - Support for images based on google distroless OS, including detection of base OS/version and installed OS dpkg packages.  Fixes #277.
++ Added - Ability to import an image analysis archive where the resulting image is owned by the account used to initiate the import. Fixes #269.
++ Added - New parameter to secret_search gate, which allows the user to specify whether to trigger if a match is found (default) or is not found (new behavior).  Fixes #264.
++ Added - New trigger in the 'files' gate to allow for checks against various file attributes - checksum and mode.  Fixes #262. Fixes #204.
++ Fix - Better parsing of www-authentiate response header when performing registry credential validation on registry add. Fixes #275.
++ Fix - Add fall-thru on fix_available check for os packages in vulnerbility gate, addressing duplicate trigger matches that are disregarded by policy. Fixes #273.
++ Fix - Addresses analysis failure in cases where image config document metadata does not contain a history element.  Fixes #260.
++ Fix - Addresses external_id reference before assignment error on ecr iam role usage. Fixes #259
++ Fix - Improvements and fixes within the version comparison implementation for dpkg and rpm. Fixes #274 and #265.
++ Improved - Enforce stricter api checks for "source" object in POST /images. Fixes #261
++ Many minor bug fixes and improvements, in API input validation, CPE-based CVE matching performance, and others
+
+## 0.5.0 (2019-09-05)
+
++ Added - Support for local image analysis tool and process, including local analyzer operation in anchore_manager and new image analysis archive import API operation
++ Added - Switch NVD feed driver to consume normalized vulnerability data from latest NVD JSON 1.0 Schema
++ Added - New parameter to vulnerabilities gate to only trigger if a fix has been available for over a specified number of days
++ Added - New parameters in vulnerabilities gate to allow for triggers based on CVSSv3 scoring information. Implements #164.
++ Added - Structured CVSS scoring information throughout external API responses, where vulnerability information is returned (vulnerability scans, vulnerability queries). Implements #163, #160, #223.
++ Added - Optional support using hashed passwords on anchore user credential storage, and adds support token-based user authentication
++ Improved - More complete CPE version strings now available from latest NVD data feed, improving scope of non-os package vulnerability matches
++ Improved - Spelling, grammar and broken link updates to top level README. Contributions by Neil Levine <levine@yoyo.org> and MichaelSimons <msimons@microsoft.com>
++ Improved - Updated validation and improved error detail for user and account management API operations
++ Improved - Updates to quickstart/example docker-compose.yaml, and bootstrap entrypoint for better custom root CA inclusion
++ Many minor bug fixes and improvements
+
+## 0.4.2 (2019-08-01)
+
++ Fix - Update to CPE match DB query, to account for package names that are not reported as lowercase.  Fixes #227.
++ Fix - Update to fix incorrect arg passing for error message construction of "detail" property, on policy bundle add validation failures.
++ Improved - Update to image analysis speed for some images exhibiting long unpack times due to layer complications. Improves squashing speed by going through layer tarfiles sequentially.
+
+## 0.4.1 (2019-07-01)
+
++ Added - Store a set of digests in a subscription record, allowing engine to run vuln_update/policy_eval checks over specified digests as well as latest. Contribution by Mattia Pagnozzi <mattia.pagnozzi@gmail.com>
++ Added - New debug_exception logger function to dump stack only at debug or higher log level, otherwise just print error.
++ Added - Adds global internal client timeouts configurable in the config.yaml file. Fixes #210 add annotations key to AnchoreImage response definition type in.
++ Fix - GET /images?history=true not returning full history list. Fixes #215
++ Fix - Allow distro discovery routine to handle case where system os metadata files are broken softlinks inside the container image. Fixes #213
++ Fix - Update to analyzer code, to keep a consistent map of files regardless of any file name slash and dot prefixes that may be present in the layer tars.  Fixes #209
++ Fix - Add input validation for registry add to prevent trailing slash and prefix schema in the registry input string. Fixes #208
++ Fix - Implement dockerfile update check to invoke on only the specific digest, not tag. Fixes #201
++ Fix - Incorrect 500 response on successful feed sync call. Fixes #198
++ Fix - On image add, ensure that subscriptions are (re)activated based on API input. Fixes #195
++ Fix - Use of body in GET /images to filter by tag and/or digest rather than only using query param
++ Fix - Don't require type and key on PUT /subscriptions, reconciling code behavior with swagger spec. Contribution by by Mattia Pagnozzi <mattia.pagnozzi@gmail.com>
++ Fix - Add missing 'annotations' key to AnchoreImage response definition type in swagger spec.
++ Fix - Add correct DB filter on userId to prevent images deleted from one user account from resulting in deletions of images in other accounts, when Image Digests align across accounts.  Fixes #224.
++ Improved - Update Dockerfile using multi-stage model
+
+## 0.4.0 (2019-05-09)
+
++ Added - Image Analysis Archive Subsystem. See #165.
++ Added - All anchore-engine services now run (by default) as non-root, including the analyzer (with new analyzer implementation)
++ Added - optional policy parameter for vulnerabilities older than N days. Implements #156. Contribution by i845783 <dan.wilson01@sap.com>
++ Added - new facility to carry anchore error codes through to API error response envelope.  Addresses #150 and will extend in future for richer error information in API responses.
++ Added - /system/error_codes route to describe possible anchore error codes.
++ Added - Re-platformed anchore engine and CLI container image on Red Hat Universal Base Image (UBI)
++ Fix - improved handling of case where default_bundle_file key is unset internally for initializers that reference that configuration key. Fixes #113.
++ Fix - skip dpkg results that are not in the explicit installed (ii) state.  Fixes #169.
++ Fix - bug in passwd_file gate's context setup that was parsing entries incorrectly.
++ Fix - bytes decode issue in the object store manager interface that is masked in py3.6 but exposed in py3.5
++ Fix - update to handle redirect for quay.io when trailing slash is omitted, during initial registry ping in validation routine.  Fixes #175.
++ Improved - cleanup feed sync error path where another sync is in progress. use the new anchore error code mechanism
++ Improved - support for psycopg2 SQL Alchemy Driver
++ Improved - new docker-compose quickstart method
++ Improved - combined analyzer module functionality
++ Improved - error message from parse_dockerimage_string. Contributed by Nicolas Simonds <nisimond@cisco.com>
++ Improved - re-introduce many integration tests and integration testing framework
++ Improved - remove more verbose logging around lease ops in monitor function of catalog
++ Improved - update workspace analyzer directory deletion to handle nested permissions errors using onerror shutil.rmtree handler, to avoid permission denied possibilities from rootless analyzer
++ Many performance, log cleanup and improvements, and other minor bugfixes
+	
+## 0.3.4 (2019-04-04)
+
++ Added - support for specifying registry credentials for specific repositories or sets of repos using wildcards. Implements #142.
++ Added - new configuration option enable_access_logging to control whether twisted access log lines are included in anchore service logs. Implements #155.
++ Added - implement orphaned service record autocleanup in the catalog services handler. Implements #145.
++ Fix - make system service events owned by the system admin account. Existing system events can be flushed via the api with context-set for anchore-system, and all future events will be in the admin account. Fixes #152.
++ Fix - added timeout support for client calls to catalog from policy engine disabled by default but configurable. Adds configurable service thread pool sizes and bumps default count from 20 to 50 threads max size. Fixes #154.
++ Fix - remove duplicates from the query/vulnerabilities records for NVD, ensuring that each namespace only has a unique and latest record for a given vulnerability ID. Fixes #166.
++ Fix - updates to policy validation and eval error handling and adds size unit support for image size check. Fixes #124.
++ Fix - cleaned up docker-compose so that mounted volume doesn't have yml extension
++ Improved - more consistent logging/event handling in service health monitor
++ Minor bug fixes and improvements
+	
 ## 0.3.3 (2019-02-22)
 
 + Added - new ssl_verify option in feeds section of default/example config yamls and related environment settings in Dockerfile, to handle cases where default feed endpoint (ancho.re) is behind proxy with site-specific cert. Fixes #141

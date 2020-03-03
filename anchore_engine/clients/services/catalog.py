@@ -7,7 +7,7 @@ import anchore_engine.configuration.localconfig
 import anchore_engine.common
 import anchore_engine.clients.services.common
 from anchore_engine.subsys import logger
-from anchore_engine.subsys.events import Event
+from anchore_engine.subsys.events import EventBase
 from anchore_engine.clients.services.internal import InternalServiceClient
 
 
@@ -21,27 +21,20 @@ class CatalogClient(InternalServiceClient):
 
         return self.call_api(http.anchy_get, 'registry_lookup', query_params={'digest': digest, 'tag': tag})
 
-    def query_vulnerabilities(self, id=None, affected_package=None, affected_package_version=None):
-        return self.call_api(http.anchy_get, 'query/vulnerabilities', query_params={'id': id, 'affected_package': affected_package, 'affected_package_version': affected_package_version})
-
-    def query_images_by_vulnerability(self, vulnerability_id=None, severity=None, namespace=None, affected_package=None, page=1, limit=None, vendor_only=True):
-        params = {
-            'vulnerability_id': vulnerability_id,
-            'severity': severity,
-            'namespace': namespace,
-            'affected_package': affected_package,
-            'vendor_only': vendor_only
-        }
-
-        return self.call_api(http.anchy_get, 'query/images/by_vulnerability', query_params=params)
-
-    def query_images_by_package(self, name=None, version=None, package_type=None, page=1, limit=None):
-        return self.call_api(http.anchy_get, 'query/images/by_package', query_params={'name': name, 'version': version, 'package_type': package_type, 'page': page, 'limit': limit})
-
     def add_repo(self, regrepo=None, autosubscribe=False, lookuptag=None):
         return self.call_api(http.anchy_post, 'repo', query_params={'regrepo': regrepo, 'autosubscribe': autosubscribe, 'lookuptag': lookuptag})
 
-    def add_image(self, tag=None, digest=None, dockerfile=None, annotations=None, created_at=None, from_archive=False):
+    def add_image(self, tag=None, digest=None, dockerfile=None, annotations=None, created_at=None, from_archive=False, allow_dockerfile_update=False):
+        """
+
+        :param tag: Tag-based pull string (e.g. docker.io/nginx:latest)
+        :param digest: digest string (e.g. sha256:123abc)
+        :param dockerfile:
+        :param annotations:
+        :param created_at:
+        :param from_archive:
+        :return:
+        """
         payload = {}
         if dockerfile:
             payload['dockerfile'] = dockerfile
@@ -49,7 +42,7 @@ class CatalogClient(InternalServiceClient):
         if annotations:
             payload['annotations'] = annotations
 
-        return self.call_api(http.anchy_post, 'images', query_params={'tag': tag, 'digest': digest, 'created_at': created_at, 'from_archive': from_archive}, body=json.dumps(payload))
+        return self.call_api(http.anchy_post, 'images', query_params={'tag': tag, 'digest': digest, 'created_at': created_at, 'from_archive': from_archive, 'allow_dockerfile_update': allow_dockerfile_update}, body=json.dumps(payload))
 
     def get_imagetags(self):
         return self.call_api(http.anchy_get, 'summaries/imagetags')
@@ -75,8 +68,8 @@ class CatalogClient(InternalServiceClient):
     def delete_image(self, imageDigest, force=False):
         return self.call_api(http.anchy_delete, 'images/{imageDigest}', path_params={'imageDigest': imageDigest}, query_params={'force': force})
 
-    def import_image(self, anchore_data):
-        return self.call_api(http.anchy_post, 'import', body=json.dumps(anchore_data))
+#    def import_image(self, anchore_data):
+#        return self.call_api(http.anchy_post, 'import', body=json.dumps(anchore_data))
 
     def add_policy(self, bundle, active=False):
         try:
@@ -153,8 +146,14 @@ class CatalogClient(InternalServiceClient):
         return self.call_api(http.anchy_delete, 'subscriptions/{id}', path_params={'id': subscription_id})
 
     def update_subscription(self, subscriptiondata, subscription_type=None, subscription_key=None, subscription_id=None):
-        if subscription_key and subscription_type:
+        if subscription_id:
+            pass
+        elif subscription_key and subscription_type:
             subscription_id = hashlib.md5('+'.join([self.request_namespace, subscription_key, subscription_type]).encode('utf8')).hexdigest()
+        elif subscriptiondata.get('subscription_key', None) and subscriptiondata.get('subscription_type', None):
+            subscription_id = hashlib.md5('+'.join([self.request_namespace, subscriptiondata.get('subscription_key'), subscriptiondata.get('subscription_type')]).encode('utf8')).hexdigest()
+        else:
+            raise Exception("cannot calculate a subscription ID without input subscription id, or input subscription_key and subscription_type")
 
         return self.call_api(http.anchy_put, 'subscriptions/{id}', path_params={'id': subscription_id}, body=json.dumps(subscriptiondata))
 
@@ -227,16 +226,18 @@ class CatalogClient(InternalServiceClient):
         return self.call_api(http.anchy_delete, 'system/registries/{registry}', path_params={'registry': registry})
 
     def add_event(self, event):
-        if not isinstance(event, Event):
+        if not isinstance(event, EventBase):
             raise TypeError('Invalid event definition')
 
         return self.call_api(http.anchy_post, 'events', body=event.to_json())
 
-    def get_events(self, source_servicename=None, source_hostid=None, resource_type=None, resource_id=None, level=None, since=None, before=None, page=None, limit=None):
+    def get_events(self, source_servicename=None, source_hostid=None, event_type=None, resource_type=None, category=None, resource_id=None, level=None, since=None, before=None, page=None, limit=None):
         query_params = {
             'source_servicename': source_servicename,
             'source_hostid': source_hostid,
+            'event_type': event_type,
             'resource_type': resource_type,
+            'category': category,
             'resource_id': resource_id,
             'level': level,
             'since': since,
@@ -317,8 +318,8 @@ class CatalogClient(InternalServiceClient):
     def get_archived_analysis(self, imageDigest):
         return self.call_api(http.anchy_get, 'archives/images/{imageDigest}', path_params={'imageDigest': imageDigest})
 
-    def list_analysis_archive_rules(self):
-        return self.call_api(http.anchy_get, 'archives/rules')
+    def list_analysis_archive_rules(self, system_global=True):
+        return self.call_api(http.anchy_get, 'archives/rules', query_params={'system_global': system_global})
 
     def add_analysis_archive_rule(self, rule):
         return self.call_api(http.anchy_post, 'archives/rules', body=json.dumps(rule))
@@ -331,3 +332,7 @@ class CatalogClient(InternalServiceClient):
 
     def delete_analysis_archive_rule(self, rule_id):
         return self.call_api(http.anchy_delete, 'archives/rules/{ruleId}', path_params={'ruleId': rule_id})
+
+    def import_archive(self, imageDigest, fileobj):
+        files = {'archive_file': ('archive_file', fileobj.read())}
+        return self.call_api(http.anchy_post, 'archives/images/data/{imageDigest}/import', path_params={'imageDigest': imageDigest}, files=files)

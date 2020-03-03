@@ -1,6 +1,7 @@
 import json
 import re
 import time
+import shlex
 
 import requests
 
@@ -70,11 +71,20 @@ def ping_docker_registry_v2(base_url, u, p, verify=True):
     try:
         # base_url is of the form 'https://index.docker.io' or 'https://mydocker.com:5000' <-- note: https only, no trailing slash, etc
         index_url = "{}/v2".format(base_url)
-        try:
-            r = requests.get(index_url, verify=verify, allow_redirects=True)
-        except Exception as err:
+
+        last_exception = None
+        for i_url in [index_url, "{}/".format(index_url)]:
+            try:
+                r = requests.get(i_url, verify=verify, allow_redirects=True)
+                index_url = i_url
+                last_exception = None
+            except Exception as err:
+                last_exception = Exception(err)
+
+        if last_exception:
             httpcode = 500
-            raise err
+            raise last_exception
+
         try:
             if r.status_code in [404]:
                 r = requests.get(index_url+'/', verify=verify, allow_redirects=True)
@@ -94,9 +104,11 @@ def ping_docker_registry_v2(base_url, u, p, verify=True):
                         www_auth = r.headers.get(hkey)
                         (www_auth_type, www_auth_raw) = re.match("(.*?) +(.*)", www_auth).groups()
                         if www_auth_type == 'Bearer':
-                            raw_keyvals = www_auth_raw.split(",")
-                            for keyval in raw_keyvals:
-                                key, val = keyval.split('=', 2)
+                            keyvals = shlex.shlex(www_auth_raw, posix=True)
+                            keyvals.whitespace_split=True
+                            keyvals.whitespace=','
+                            for keyval in keyvals:
+                                (key,val) = keyval.split('=', 1)
                                 if key.lower() == 'realm':
                                     auth_url = val.replace('"', '')
                                 else:
@@ -161,6 +173,8 @@ def ping_docker_registry(registry_record):
 
     try:
         registry = registry_record['registry']
+        registry = registry.split('/', 1)[0]
+
         verify = registry_record['registry_verify']
         if registry in ['docker.io']:
             url = "https://index.docker.io"
@@ -188,7 +202,7 @@ def get_repo_tags(userId, image_info, registry_creds=None):
 
     registry = image_info['registry']
     try:
-        user, pw, registry_verify = anchore_engine.auth.common.get_creds_by_registry(registry, registry_creds=registry_creds)
+        user, pw, registry_verify = anchore_engine.auth.common.get_creds_by_registry(registry, image_info['repo'], registry_creds=registry_creds)
     except Exception as err:
         raise err    
 
@@ -218,7 +232,7 @@ def get_image_manifest(userId, image_info, registry_creds):
 
     registry = image_info['registry']
     try:
-        user, pw, registry_verify = anchore_engine.auth.common.get_creds_by_registry(registry, registry_creds=registry_creds)
+        user, pw, registry_verify = anchore_engine.auth.common.get_creds_by_registry(registry, image_info['repo'], registry_creds=registry_creds)
     except Exception as err:
         raise err    
 
@@ -247,18 +261,21 @@ def get_image_manifest(userId, image_info, registry_creds):
     err = manifest = digest = parentdigest = None
     try:
         if tag:
-            manifest, digest, parentdigest = get_image_manifest_skopeo(url, registry, repo, intag=tag, user=user, pw=pw, verify=registry_verify)
+            manifest, digest, parentdigest, parentmanifest = get_image_manifest_skopeo(url, registry, repo, intag=tag, user=user, pw=pw, verify=registry_verify)
         elif input_digest:
-            manifest, digest, parentdigest = get_image_manifest_skopeo(url, registry, repo, indigest=input_digest, user=user, pw=pw, verify=registry_verify)
+            manifest, digest, parentdigest, parentmanifest = get_image_manifest_skopeo(url, registry, repo, indigest=input_digest, user=user, pw=pw, verify=registry_verify)
         else:
             raise Exception("neither tag nor digest was given as input")
     except Exception as ex:
         logger.error("could not fetch manifest/digest: " + str(ex))
-        manifest = digest = parentdigest = None
+        manifest = digest = parentdigest = parentmanifest = None
         err = ex
 
     if manifest and digest:
-        return(manifest, digest, parentdigest)
+        return(manifest, digest, parentdigest, parentmanifest)
 
     logger.error("could not get manifest/digest for image ({}) from registry ({}) - error: {}".format(fulltag, url, err))
-    raise Exception("could not get manifest/digest for image ({}) from registry ({}) - error: {}".format(fulltag, url, err))
+    if err:
+        raise err
+    else:
+        raise Exception("could not get manifest/digest for image ({}) from registry ({}) - error: {}".format(fulltag, url, err))

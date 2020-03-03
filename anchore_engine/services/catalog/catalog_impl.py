@@ -2,6 +2,7 @@ import json
 import hashlib
 import time
 import base64
+import re
 
 from dateutil import parser as dateparser
 
@@ -25,6 +26,8 @@ from sqlalchemy.orm import Session
 from anchore_engine.clients.services import internal_client_for
 from anchore_engine.clients.services.policy_engine import PolicyEngineClient
 from anchore_engine.subsys.identities import manager_factory
+from anchore_engine.apis.exceptions import BadRequest, AnchoreApiError
+import anchore_engine.subsys.events 
 
 def policy_engine_image_load(client, imageUserId, imageId, imageDigest):
     """
@@ -206,7 +209,7 @@ def image(dbsession, request_inputs, bodycontent=None):
     method = request_inputs['method']
     params = request_inputs['params']
     userId = request_inputs['userId']
-
+    
     return_object = {}
     httpcode = 500
 
@@ -244,7 +247,15 @@ def image(dbsession, request_inputs, bodycontent=None):
                             refresh_registry_creds(registry_creds, dbsession)
                         except Exception as err:
                             logger.warn("failed to refresh registry credentials - exception: " + str(err))
-                        image_info = anchore_engine.common.images.get_image_info(userId, "docker", input_string, registry_lookup=True, registry_creds=registry_creds)
+                        try:
+                            image_info = anchore_engine.common.images.get_image_info(userId, "docker", input_string, registry_lookup=True, registry_creds=registry_creds)
+                        except Exception as err:
+                            fail_event = anchore_engine.subsys.events.ImageRegistryLookupFailed(user_id=userId, image_pull_string=input_string, data=err.__dict__)
+                            try:
+                                add_event(fail_event, dbsession)
+                            except:
+                                logger.warn('Ignoring error creating image registry lookup event')
+                            raise err
                     except Exception as err:
                         httpcode = 404
                         raise Exception("cannot perform registry lookup - exception: " + str(err))
@@ -286,9 +297,10 @@ def image(dbsession, request_inputs, bodycontent=None):
         elif method == 'POST':
             timer = time.time()
 
-            logger.debug("MARK0: " + str(time.time() - timer))
             if input_type == 'digest':
                 raise Exception("catalog add requires a tag string to determine registry/repo")
+
+            allow_dockerfile_update = params.get('allow_dockerfile_update', False)
 
             # body
             jsondata = {}
@@ -305,12 +317,11 @@ def image(dbsession, request_inputs, bodycontent=None):
                     dockerfile_mode = "Actual"
                 except Exception as err:
                     raise Exception("input dockerfile data must be base64 encoded - exception on decode: " + str(err))
-
+                
             annotations = {}
             if 'annotations' in jsondata:
                 annotations = jsondata['annotations']
 
-            logger.debug("MARK1: " + str(time.time() - timer))
 
             image_record = {}
             try:
@@ -319,8 +330,6 @@ def image(dbsession, request_inputs, bodycontent=None):
                     refresh_registry_creds(registry_creds, dbsession)
                 except Exception as err:
                     logger.warn("failed to refresh registry credentials - exception: " + str(err))
-
-                logger.debug("MARK2: " + str(time.time() - timer))
 
                 image_info_overrides = {}
 
@@ -341,13 +350,20 @@ def image(dbsession, request_inputs, bodycontent=None):
                     logger.debug("INPUT STRING: {}".format(input_string))
                     logger.debug("INPUT IMAGE INFO: {}".format(image_info))
                     logger.debug("INPUT IMAGE INFO OVERRIDES: {}".format(image_info_overrides))
-                    image_info = anchore_engine.common.images.get_image_info(userId, 'docker', input_string, registry_lookup=True, registry_creds=registry_creds)
+                    try:
+                        image_info = anchore_engine.common.images.get_image_info(userId, 'docker', input_string, registry_lookup=True, registry_creds=registry_creds)
+                    except Exception as err:
+                        fail_event = anchore_engine.subsys.events.ImageRegistryLookupFailed(user_id=userId, image_pull_string=input_string, data=err.__dict__)
+                        try:
+                            add_event(fail_event, dbsession)
+                        except:
+                            logger.warn('Ignoring error creating image registry lookup event')
+                        raise err
 
                     if image_info_overrides:
                         image_info.update(image_info_overrides)
 
                     logger.debug("INPUT FINAL IMAGE INFO: {}".format(image_info))
-                    logger.debug("MARK3: " + str(time.time() - timer))
 
                     manifest = None
                     try:
@@ -358,14 +374,22 @@ def image(dbsession, request_inputs, bodycontent=None):
                     except Exception as err:
                         raise Exception("could not fetch/parse manifest - exception: " + str(err))
 
-                    logger.debug("MARK4: " + str(time.time() - timer))
-
+                    parent_manifest = json.dumps(image_info.get('parentmanifest', {}))
+                    
                     logger.debug("ADDING/UPDATING IMAGE IN IMAGE POST: " + str(image_info))
-                    image_records = add_or_update_image(dbsession, userId, image_info['imageId'], tags=[image_info['fulltag']], digests=[image_info['fulldigest']], parentdigest=image_info.get('parentdigest', None), created_at=image_info.get('created_at_override', None), dockerfile=dockerfile, dockerfile_mode=dockerfile_mode, manifest=manifest, annotations=annotations)
-                    logger.debug("MARK5: " + str(time.time() - timer))
+
+                    # Check for dockerfile updates to an existing image
+                    if not allow_dockerfile_update and dockerfile and dockerfile_mode.lower() == 'actual':
+                        found_img = db_catalog_image.get(imageDigest=image_info['digest'], userId=userId, session=dbsession)
+                        if found_img:
+                            raise BadRequest('Cannot specify dockerfile for an image that already exists unless using force=True for re-analysis', detail={'digest': image_info['digest'], 'tag': image_info['fulltag']})
+
+                    image_records = add_or_update_image(dbsession, userId, image_info['imageId'], tags=[image_info['fulltag']], digests=[image_info['fulldigest']], parentdigest=image_info.get('parentdigest', None), created_at=image_info.get('created_at_override', None), dockerfile=dockerfile, dockerfile_mode=dockerfile_mode, manifest=manifest, parent_manifest=parent_manifest, annotations=annotations)
                     if image_records:
                         image_record = image_records[0]
 
+            except AnchoreApiError:
+                raise
             except Exception as err:
                 logger.exception('Error adding image')
                 httpcode = 404
@@ -378,6 +402,10 @@ def image(dbsession, request_inputs, bodycontent=None):
                 httpcode = 404
                 raise Exception("could not add input image")
 
+    except AnchoreApiError as err:
+        logger.exception('Error processing image request')
+        return_object = anchore_engine.common.helpers.make_response_error(err.message, in_httpcode=err.__response_code__)
+        httpcode = err.__response_code__
     except Exception as err:
         logger.exception('Error processing image request')
         return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
@@ -447,71 +475,71 @@ def image_imageDigest(dbsession, request_inputs, imageDigest, bodycontent=None):
 
     return(return_object, httpcode)
 
-def image_import(dbsession, request_inputs, bodycontent=None):
-    user_auth = request_inputs['auth']
-    method = request_inputs['method']
-    params = request_inputs['params']
-    userId = request_inputs['userId']
-
-    return_object = {}
-    httpcode = 500
-
-    try:
-        jsondata = {}
-        if bodycontent:
-            try:
-                jsondata = bodycontent
-            except Exception as err:
-                raise err
-
-        anchore_data = [jsondata]
-
-        try:
-            # extract necessary input from anchore analysis data
-            a = anchore_data[0]
-            imageId = a['image']['imageId']
-            docker_data = a['image']['imagedata']['image_report']['docker_data']
-
-            digests = []
-            islocal = False
-            if not docker_data['RepoDigests']:
-                islocal = True
-            else:
-                for digest in docker_data['RepoDigests']:
-                    digests.append(digest)
-
-            tags = []
-            for tag in docker_data['RepoTags']:
-                image_info = anchore_engine.utils.parse_dockerimage_string(tag)
-                if islocal:
-                    image_info['registry'] = 'localbuild'
-                    digests.append(image_info['registry'] + "/" + image_info['repo'] + "@local:" + imageId)
-                fulltag = image_info['registry'] + "/" + image_info['repo'] + ":" + image_info['tag']
-                tags.append(fulltag)
-                
-            # add the image w input anchore_analysis, as already analyzed
-            logger.debug("ADDING/UPDATING IMAGE IN IMAGE IMPORT: " + str(imageId))
-            ret_list = add_or_update_image(dbsession, userId, imageId, tags=tags, digests=digests, anchore_data=anchore_data)
-
-            client = internal_client_for(PolicyEngineClient, userId)
-            for image_report in ret_list:
-                imageDigest = image_report['imageDigest']
-                try:
-                    resp = policy_engine_image_load(client, userId, imageId, imageDigest)
-                except Exception as err:
-                    logger.warn("failed to load image data into policy engine: " + str(err))
-            # return the new image:
-            return_object = ret_list
-            httpcode = 200
-        except Exception as err:
-            httpcode = 500
-            raise err
-
-    except Exception as err:
-        return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
-
-
-    return(return_object, httpcode)
+#def image_import(dbsession, request_inputs, bodycontent=None):
+#    user_auth = request_inputs['auth']
+#    method = request_inputs['method']
+#    params = request_inputs['params']
+#    userId = request_inputs['userId']
+#
+#    return_object = {}
+#    httpcode = 500
+#
+#    try:
+#        jsondata = {}
+#        if bodycontent:
+#            try:
+#                jsondata = bodycontent
+#            except Exception as err:
+#                raise err
+#
+#        anchore_data = [jsondata]
+#
+#        try:
+#            # extract necessary input from anchore analysis data
+#            a = anchore_data[0]
+#            imageId = a['image']['imageId']
+#            docker_data = a['image']['imagedata']['image_report']['docker_data']
+#
+#            digests = []
+#            islocal = False
+#            if not docker_data['RepoDigests']:
+#                islocal = True
+#            else:
+#                for digest in docker_data['RepoDigests']:
+#                    digests.append(digest)
+#
+#            tags = []
+#            for tag in docker_data['RepoTags']:
+#                image_info = anchore_engine.utils.parse_dockerimage_string(tag)
+#                if islocal:
+#                    image_info['registry'] = 'localbuild'
+#                    digests.append(image_info['registry'] + "/" + image_info['repo'] + "@local:" + imageId)
+#                fulltag = image_info['registry'] + "/" + image_info['repo'] + ":" + image_info['tag']
+#                tags.append(fulltag)
+#                
+#            # add the image w input anchore_analysis, as already analyzed
+#            logger.debug("ADDING/UPDATING IMAGE IN IMAGE IMPORT: " + str(imageId))
+#            ret_list = add_or_update_image(dbsession, userId, imageId, tags=tags, digests=digests, anchore_data=anchore_data)
+#
+#            client = internal_client_for(PolicyEngineClient, userId)
+#            for image_report in ret_list:
+#                imageDigest = image_report['imageDigest']
+#                try:
+#                    resp = policy_engine_image_load(client, userId, imageId, imageDigest)
+#                except Exception as err:
+#                    logger.warn("failed to load image data into policy engine: " + str(err))
+#            # return the new image:
+#            return_object = ret_list
+#            httpcode = 200
+#        except Exception as err:
+#            httpcode = 500
+#            raise err
+#
+#    except Exception as err:
+#        return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
+#
+#
+#    return(return_object, httpcode)
 
 def subscriptions(dbsession, request_inputs, subscriptionId=None, bodycontent=None):
     user_auth = request_inputs['auth']
@@ -589,19 +617,27 @@ def subscriptions(dbsession, request_inputs, subscriptionId=None, bodycontent=No
         elif method == 'PUT':
             subscriptiondata = bodycontent if bodycontent is not None else {}
 
-            subscription_key = subscription_type = None
-            if 'subscription_key' in subscriptiondata:
-                subscription_key=subscriptiondata['subscription_key']
-            if 'subscription_type' in subscriptiondata:
-                subscription_type=subscriptiondata['subscription_type']
+            subscription_record = subscription_key = subscription_type = None
+            dbfilter = {}
+            if subscriptionId:
+                subscription_record = db_subscriptions.get(userId, subscriptionId, session=dbsession)
 
-            
-            if not subscription_key or not subscription_type:
-                httpcode = 500
-                raise Exception("body does not contain both subscription_key and subscription_type")
+                subscription_key = subscription_record['subscription_key']
+                subscription_type = subscription_record['subscription_type']
 
-            dbfilter = {'subscription_key':subscription_key, 'subscription_type':subscription_type}
-            subscription_record = db_subscriptions.get_byfilter(userId, session=dbsession, **dbfilter)
+                dbfilter['subscription_id'] = subscriptionId
+            else:
+                if 'subscription_key' in subscriptiondata:
+                    subscription_key=subscriptiondata['subscription_key']
+                if 'subscription_type' in subscriptiondata:
+                    subscription_type=subscriptiondata['subscription_type']
+
+                if not subscription_key or not subscription_type:
+                    raise Exception("body does not contain both subscription_key and subscription_type")
+
+                dbfilter = {'subscription_key':subscription_key, 'subscription_type':subscription_type}
+                subscription_record = db_subscriptions.get_byfilter(userId, session=dbsession, **dbfilter)
+
             if not subscription_record:
                 httpcode = 404
                 raise Exception("subscription to update does not exist in DB")
@@ -695,7 +731,14 @@ def events(dbsession, request_inputs, bodycontent=None):
                 httpcode = 400
                 raise Exception('limit must be valid integer between 1 and 1000')
 
-            ret = db_events.get_byfilter(userId=userId, session=dbsession, since=since, before=before, page=page, limit=limit, **dbfilter)
+            event_type = params.get('event_type')
+            if event_type:
+                event_type = event_type.lower()
+                if not re.match(r'[a-z0-9-_.*]+', event_type):
+                    httpcode = 400
+                    raise Exception('Unacceptable chars in event_type. Must match regex "[a-z0-9-_.*]+"')
+
+            ret = db_events.get_byfilter(userId=userId, session=dbsession, event_type=event_type, since=since, before=before, page=page, limit=limit, **dbfilter)
             if not ret:
                 httpcode = 404
                 raise Exception("events not found in DB")
@@ -731,23 +774,16 @@ def events(dbsession, request_inputs, bodycontent=None):
             return_object = ret
 
         elif method == 'POST':
-            record = db_events.add(session=dbsession, msg=jsondata)
+            record = add_event_json(jsondata, dbsession, quiet=False)
 
             if record:
                 httpcode = 200
                 return_object = record
 
-                # Notification for the new event
-                try:
-                    logger.debug("queueing event creation notification")
-                    npayload = {'event': return_object['event']}
-                    rc = notifications.queue_notification(userId, subscription_key=return_object['event']['level'], subscription_type='event_log', payload=npayload)
-                except Exception as err:
-                    logger.warn("failed to enqueue notification for event creation - exception: " + str(err))
-
             else:
                 httpcode = 500
                 raise Exception('Cannot create event')
+
     except Exception as err:
         logger.exception('Error in events handler')
         return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
@@ -927,6 +963,9 @@ def system_registries(dbsession, request_inputs, bodycontent={}):
                     httpcode = 406
                     raise Exception("cannot ping supplied registry with supplied credentials - exception: {}".format(str(err)))
 
+            if not registrydata.get('registry_name', None):
+                registrydata['registry_name'] = registry
+
             rc = db_registries.add(registry, userId, registrydata, session=dbsession)
             registry_records = db_registries.get(registry, userId, session=dbsession)
 
@@ -971,8 +1010,11 @@ def refresh_registry_creds(registry_records, dbsession):
                         dorefresh =False
 
                 if dorefresh:
+                    registry_parts = registry_record['registry'].split('/', 1)
+                    registry = registry_parts[0]
+
                     logger.debug("refreshing ecr registry: " + str(registry_record['userId']) + " : " + str(registry_record['registry']))
-                    ecr_data = aws_ecr.refresh_ecr_credentials(registry_record['registry'], registry_record['registry_user'], registry_record['registry_pass'])
+                    ecr_data = aws_ecr.refresh_ecr_credentials(registry, registry_record['registry_user'], registry_record['registry_pass'])
                     registry_record['registry_meta'] = json.dumps(ecr_data)
                     db_registries.update_record(registry_record, session=dbsession)
 
@@ -1070,16 +1112,11 @@ def system_subscriptions(dbsession, request_inputs):
 
 ################################################################################
 
-def perform_vulnerability_scan(userId, imageDigest, dbsession, scantag=None, force_refresh=False):
+def perform_vulnerability_scan(userId, imageDigest, dbsession, scantag=None, force_refresh=False, is_current=False):
     # prepare inputs
     obj_store = None
     try:
         obj_store = anchore_engine.subsys.object_store.manager.get_manager()
-
-        mgr = manager_factory.for_session(dbsession)
-        system_user_auth = mgr.get_system_credentials()
-        system_userId = system_user_auth[0]
-        system_password = system_user_auth[1]
 
         localconfig = anchore_engine.configuration.localconfig.get_config()
         verify = localconfig['internal_ssl_verify']
@@ -1105,6 +1142,14 @@ def perform_vulnerability_scan(userId, imageDigest, dbsession, scantag=None, for
         if imageId and imageId not in imageIds:
             imageIds.append(imageId)
 
+            
+    archiveId = "{}/{}".format(image_record["imageDigest"], scantag)
+    compare_archiveId = archiveId
+    # if the call was made indicating that this scan is against the latest digest/tag mapping, then compare the result to the tag-only last result
+    if is_current:
+        compare_archiveId = scantag
+
+    logger.debug("archiveId={} compare_archiveId={}".format(archiveId, compare_archiveId))
 
     for imageId in imageIds:
         # do the image load, just in case it was missed in analyze...
@@ -1117,7 +1162,7 @@ def perform_vulnerability_scan(userId, imageDigest, dbsession, scantag=None, for
 
         last_vuln_result = {}
         try:
-            last_vuln_result = obj_store.get_document(userId, 'vulnerability_scan', scantag)
+            last_vuln_result = obj_store.get_document(userId, 'vulnerability_scan', compare_archiveId)
         except:
             pass
 
@@ -1128,7 +1173,9 @@ def perform_vulnerability_scan(userId, imageDigest, dbsession, scantag=None, for
         if last_vuln_result and curr_vuln_result:
             vdiff = anchore_utils.process_cve_status(old_cves_result=last_vuln_result['legacy_report'], new_cves_result=curr_vuln_result['legacy_report'])
 
-        obj_store.put_document(userId, 'vulnerability_scan', scantag, curr_vuln_result)
+        obj_store.put_document(userId, 'vulnerability_scan', archiveId, curr_vuln_result)
+        if archiveId != compare_archiveId:
+            obj_store.put_document(userId, 'vulnerability_scan', compare_archiveId, curr_vuln_result)
 
         try:
             if vdiff and (vdiff['updated'] or vdiff['added'] or vdiff['removed']):
@@ -1151,7 +1198,16 @@ def perform_vulnerability_scan(userId, imageDigest, dbsession, scantag=None, for
                 if annotations:
                     npayload['annotations'] = annotations
 
-                rc = notifications.queue_notification(userId, scantag, 'vuln_update', npayload)
+                # original method
+                #rc = notifications.queue_notification(userId, scantag, 'vuln_update', npayload)
+
+                # new method
+                npayload['subscription_type'] = 'vuln_update'
+                success_event = anchore_engine.subsys.events.TagVulnerabilityUpdated(user_id=userId, full_tag=scantag, data=npayload)
+                try:
+                    add_event(success_event, dbsession)
+                except:
+                    logger.warn('Ignoring error creating image vulnerability update event')
             except Exception as err:
                 logger.warn("failed to enqueue notification - exception: " + str(err))
 
@@ -1175,6 +1231,9 @@ def perform_policy_evaluation(userId, imageDigest, dbsession, evaltag=None, poli
 
         if not policyId:
             policy_record = db_policybundle.get_active_policy(userId, session=dbsession)
+            if not policy_record:
+                raise Exception("no policy bundle is currently active")
+            
             policyId = policy_record['policyId']
 
         policy_bundle = obj_store.get_document(userId, 'policy_bundles', policyId)
@@ -1212,6 +1271,13 @@ def perform_policy_evaluation(userId, imageDigest, dbsession, evaltag=None, poli
         except Exception as err:
             raise err
         curr_final_action = curr_evaluation_result.get('final_action', '').upper()
+        # TODO hack! Include image digest and status, needed for the downstream notifications handler
+        if curr_evaluation_result:
+            curr_evaluation_result['image_digest'] = imageDigest
+            if curr_final_action in ['GO', 'WARN']:
+                curr_evaluation_result['status'] = 'pass'
+            else:
+                curr_evaluation_result['status'] = 'fail'
         
         # set up the newest evaluation
         evalId = hashlib.md5(':'.join([policyId, userId, imageDigest, fulltag, str(curr_final_action)]).encode('utf8')).hexdigest()
@@ -1231,6 +1297,12 @@ def perform_policy_evaluation(userId, imageDigest, dbsession, evaltag=None, poli
                 try:
                     last_evaluation_result = obj_store.get_document(userId, 'policy_evaluations', last_evaluation_record['evalId'])
                     last_final_action = last_evaluation_result['final_action'].upper()
+                    # TODO hack! Include image digest and status, needed for the downstream notifications handler
+                    last_evaluation_result['image_digest'] = imageDigest
+                    if last_final_action in ['GO', 'WARN']:
+                        last_evaluation_result['status'] = 'pass'
+                    else:
+                        last_evaluation_result['status'] = 'fail'
                 except:
                     logger.warn("no last eval record - skipping")
 
@@ -1257,7 +1329,16 @@ def perform_policy_evaluation(userId, imageDigest, dbsession, evaltag=None, poli
                     if annotations:
                         npayload['annotations'] = annotations
 
-                    rc = notifications.queue_notification(userId, fulltag, 'policy_eval', npayload)
+                    # original method    
+                    #rc = notifications.queue_notification(userId, fulltag, 'policy_eval', npayload)
+
+                    # new method
+                    npayload['subscription_type'] = 'policy_eval'
+                    success_event = anchore_engine.subsys.events.TagPolicyEvaluationUpdated(user_id=userId, full_tag=fulltag, data=npayload)
+                    try:
+                        add_event(success_event, dbsession)
+                    except:
+                        logger.warn('Ignoring error creating image policy evaluation update event')
                 except Exception as err:
                     logger.warn("failed to enqueue notification - exception: " + str(err))
 
@@ -1265,9 +1346,8 @@ def perform_policy_evaluation(userId, imageDigest, dbsession, evaltag=None, poli
 
     return(curr_evaluation_record, curr_evaluation_result)
 
-def add_or_update_image(dbsession, userId, imageId, tags=[], digests=[], parentdigest=None, created_at=None, anchore_data=None, dockerfile=None, dockerfile_mode=None, manifest=None, annotations={}):
+def add_or_update_image(dbsession, userId, imageId, tags=[], digests=[], parentdigest=None, created_at=None, anchore_data=None, dockerfile=None, dockerfile_mode=None, manifest=None, annotations={}, parent_manifest=None):
     ret = []
-
     logger.debug("adding based on input tags/digests for imageId ("+str(imageId)+") tags="+str(tags)+" digests="+str(digests))
     obj_store = anchore_engine.subsys.object_store.manager.get_manager()
 
@@ -1354,11 +1434,15 @@ def add_or_update_image(dbsession, userId, imageId, tags=[], digests=[], parentd
 
                         try:
                             rc = obj_store.put_document(userId, 'manifest_data', imageDigest, manifest)
+                            rc = obj_store.put_document(userId, 'parent_manifest_data', imageDigest, parent_manifest)
 
                             rc = db_catalog_image.add_record(new_image_record, session=dbsession)
                             image_record = db_catalog_image.get(imageDigest, userId, session=dbsession)
                             if not manifest:
                                 manifest = json.dumps({})
+                            if not parent_manifest:
+                                parent_manifest = json.dumps({})
+                                
                         except Exception as err:
                             raise anchore_engine.common.helpers.make_anchore_exception(err, input_message="cannot add image, failed to update archive/DB", input_httpcode=500)
 
@@ -1401,21 +1485,25 @@ def add_or_update_image(dbsession, userId, imageId, tags=[], digests=[], parentd
 
                         try:
                             rc = obj_store.put_document(userId, 'manifest_data', imageDigest, manifest)
+                            rc = obj_store.put_document(userId, 'parent_manifest_data', imageDigest, parent_manifest)                            
 
                             rc = db_catalog_image.update_record_image_detail(image_record, new_image_detail, session=dbsession)
+
+                            # TODO - update policy engine 
+
                             image_record = db_catalog_image.get(imageDigest, userId, session=dbsession)
                             if not manifest:
                                 manifest = json.dumps({})
+                            if not parent_manifest:
+                                parent_manifest = json.dumps({})                                
                         except Exception as err:
                             raise anchore_engine.common.helpers.make_anchore_exception(err, input_message="cannot add image, failed to update archive/DB", input_httpcode=500)
 
                     addlist[imageDigest] = image_record
 
-    #logger.debug("final dict of image(s) to add: " + json.dumps(addlist, indent=4))
     for imageDigest in list(addlist.keys()):
         ret.append(addlist[imageDigest])
 
-    #logger.debug("returning: " + json.dumps(ret, indent=4))
     return(ret)
 
 
@@ -1430,6 +1518,7 @@ def do_image_delete(userId, image_record, dbsession, force=False):
         dodelete = False
         msgdelete = "could not make it though delete checks"
         image_ids = []
+        image_fulltags = []
 
         if True:
             # do some checking before delete
@@ -1442,6 +1531,7 @@ def do_image_delete(userId, image_record, dbsession, force=False):
                 # check two - don't delete anything that is the latest of any of its tags, and has an active subscription
                 for image_detail in image_record['image_detail']:
                     fulltag = image_detail['registry'] + "/" + image_detail['repo'] + ":" + image_detail['tag']
+                    image_fulltags.append(fulltag)
 
                     if 'imageId' in image_detail and image_detail['imageId']:
                         image_ids.append(image_detail['imageId'])
@@ -1476,9 +1566,18 @@ def do_image_delete(userId, image_record, dbsession, force=False):
             logger.debug("DELETEing image from catalog")
             rc = db_catalog_image.delete(imageDigest, userId, session=dbsession)
 
-            for bucket in ['analysis_data', 'query_data', 'image_content_data', 'image_summary_data', 'manifest_data']:
-                logger.debug("DELETEing image from archive " + str(bucket) + "/" + str(imageDigest))
-                rc = obj_store.delete(userId, bucket, imageDigest)
+            # digest-based archiveId buckets
+            for bucket in ['analysis_data', 'query_data', 'image_content_data', 'image_summary_data', 'manifest_data', 'parent_manifest_data']:
+                archiveId = imageDigest
+                logger.debug("DELETEing image from archive {}/{}".format(bucket, archiveId))
+                rc = obj_store.delete(userId, bucket, archiveId)
+
+            # digest/tag-based archiveId buckets
+            for bucket in ['vulnerability_scan']:
+                for fulltag in image_fulltags:
+                    archiveId = "{}/{}".format(imageDigest, fulltag)
+                    logger.debug("DELETEing image from archive {}/{}".format(bucket, archiveId))
+                    rc = obj_store.delete(userId, bucket, archiveId)
 
             logger.debug("DELETEing image from policy_engine")
 
@@ -1596,6 +1695,42 @@ def do_registry_delete(userId, registry_record, dbsession, force=False):
 
     return(return_object, httpcode)
 
+
+def add_event(event, dbsession, quiet=True):
+    """
+    Add an event object
+
+    Returns a dict object of the event as was added to the system
+
+    :param event:
+    :param dbsession:
+    :param quiet:
+    :return:
+    """
+    return add_event_json(event.to_dict(), dbsession, quiet)
+
+
+def add_event_json(event_json, dbsession, quiet=True):
+    """
+    Add a raw json dict as an event
+    :param event_json:
+    :param dbsession:
+    :param quiet:
+    :return:
+    """
+
+    try:
+        added_event_json = db_events.add(event_json, session=dbsession)
+
+        logger.debug("queueing event creation notification: {}".format(added_event_json))
+        rc = notifications.queue_notification(added_event_json['event']['resource']['user_id'], subscription_key=added_event_json['event']['level'],
+                                              subscription_type='event_log', payload=added_event_json)
+        return added_event_json
+    except:
+        if quiet:
+            logger.exception('Ignoring error creating/notifying event: {}'.format(event_json))
+        else:
+            raise
 
 
 ################################################################################

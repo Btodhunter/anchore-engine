@@ -10,7 +10,7 @@ import sqlalchemy
 from sqlalchemy import func
 
 
-def get_byfilter(userId, session=None, since=None, before=None, page=1, limit=100, **dbfilter):
+def get_byfilter(userId, session=None, event_type=None, since=None, before=None, page=1, limit=100, **dbfilter):
     if not session:
         session = db.Session
 
@@ -26,6 +26,13 @@ def get_byfilter(userId, session=None, since=None, before=None, page=1, limit=10
             resq = resq.filter(Event.timestamp < before)
         if since:
             resq = resq.filter(Event.timestamp > since)
+
+        if event_type:
+            event_type_like = event_type.replace('*', '%')
+            if event_type == event_type_like:
+                resq = resq.filter(Event.type == event_type)
+            else:
+                resq = resq.filter(Event.type.like(event_type_like))
 
         start = (page-1) * limit
         end = start + limit + 1  # get one more result than requested, required to indicate next token
@@ -44,6 +51,13 @@ def get_byfilter(userId, session=None, since=None, before=None, page=1, limit=10
             resq = resq.filter(Event.timestamp < before)
         if since:
             resq = resq.filter(Event.timestamp > since)
+
+        if event_type:
+            event_type_like = event_type.replace('*', '%')
+            if event_type == event_type_like:
+                resq = resq.filter(Event.type == event_type)
+            else:
+                resq = resq.filter(Event.type.like(event_type_like))
 
         # sqlalchemy does not like it if limit is applied before filter
         resq = resq.order_by(Event.timestamp.desc()).limit(limit + 1)
@@ -142,7 +156,7 @@ def _db_to_dict(db_event):
 
         if key in ['generated_uuid', 'created_at']:
             msg[key] = value if type(value) != datetime.datetime else _format_timestamp(value)
-        elif value:
+        else:
             if key.startswith('resource') or key.startswith('source'):
                 key1, key2 = key.split('_', 1)
                 if key1 not in msg['event']:

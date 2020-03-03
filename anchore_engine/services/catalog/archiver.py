@@ -11,6 +11,7 @@ import io
 import time
 import uuid
 
+from sqlalchemy import or_, and_
 from anchore_engine.apis.serialization import JitSchema, JsonMappedMixin
 from anchore_engine.utils import datetime_to_rfc3339, ensure_str, ensure_bytes
 from anchore_engine.clients.services.policy_engine import PolicyEngineClient
@@ -23,12 +24,50 @@ from anchore_engine.db import db_catalog_image, db_catalog_image_docker, db_poli
 from anchore_engine.db.entities import exceptions as db_exceptions
 from anchore_engine.configuration import localconfig
 from anchore_engine.services.catalog.catalog_impl import image_imageDigest
+from anchore_engine.subsys.events import ImageArchiveDeleted, ImageRestored, ImageArchived, ImageArchiveDeleteFailed, ImageArchivingFailed, ImageRestoreFailed
+
 
 # Json serialization stuff...
 from marshmallow import fields, post_load
 
 DRY_RUN_ENV_VAR = 'ANCHORE_ANALYSIS_ARCHIVE_DRYRUN_ENABLED'
 DRY_RUN_MODE = (os.getenv(DRY_RUN_ENV_VAR, 'false').lower() == 'true')
+
+_add_event_fn = None
+from threading import RLock
+event_init_lock = RLock()
+
+
+def init_events(handler_fn=None):
+    """
+    Indirection to allow injection of different handler for testing and delay the binding to catalog specific code unless invoked
+
+    :param handler_fn: a callable that takes two args: event (type Event) and quiet (bool)
+    :return:
+    """
+
+    global _add_event_fn, event_init_lock
+    with event_init_lock:
+        if not handler_fn and _add_event_fn is None:
+            from anchore_engine.services.catalog import _add_event
+            _add_event_fn = _add_event
+
+
+def add_event(event):
+    """
+    Adds an event to the system. Will swallow all exceptions to ensure clean exit even in finally blocks
+    :param event:
+    :return:
+    """
+
+    global _add_event_fn
+    # Unsafe check but the init call is safe so at most this is redundant but safe and only impacts init
+    try:
+        if _add_event_fn is None:
+            init_events()
+        return _add_event_fn(event)
+    except Exception as ex:
+        logger.exception('Uncaught exception from event emitter: {}'.format(event))
 
 
 class ArtifactNotFound(Exception):
@@ -261,7 +300,89 @@ class ImageAnalysisArchiver(object):
         self.parent_task_id = parent_task_id
         self.delete_source = delete_source
 
+
+    def _get_globals(self, session):
+        # Select rules that are archive transitions, and either global, or specific to this account
+        rules = session.query(ArchiveTransitionRule).filter_by(transition=ArchiveTransitions.archive, system_global=True).all()
+        return rules
+
+    def _get_account_rules(self, session):
+        # Select rules that are archive transitions, and either global, or specific to this account
+        rules = session.query(ArchiveTransitionRule).filter_by(transition=ArchiveTransitions.archive, account=self.account).all()
+        return rules
+
+    # NOTE: still should process rules in per-account order to ensure no strange rule eval of duplicate tags/digests across accounts
+    def _process_rules(self, rules, session):
+        def lookup_tags(account, digest):
+            return session.query(CatalogImageDocker).filter_by(userId=account, imageDigest=digest).all()
+
+        archive_merger = ArchiveTransitionTask.TagRuleMatchMerger(self.task_id, self.account, lookup_tags)
+
+        for rule in rules:
+            logger.debug('Running archive transition rule: {}'.format(rule))
+
+            matches = self._find_candidates(session, rule)
+            logger.debug('Rule: {} matches {}'.format(rule, matches))
+            archive_merger.add_rule_result(rule, matches)
+
+        return archive_merger.full_matched_digests()
+
+    def _do_archive(self, to_archive):
+        for img_digest in to_archive:
+            logger.info('Archiving image {}/{}'.format(self.account, img_digest))
+            try:
+                if not DRY_RUN_MODE:
+                    t = ArchiveImageTask(account=self.account, image_digest=img_digest)
+                    status, msg = t.run()
+                    logger.info('Archive task result: status={}, detail={}'.format(status, msg))
+
+                    if status == 'archived':
+                        logger.info('Deleting source analysis for image {} after archiving'.format(img_digest))
+                        if self.delete_source:
+                            inputs = {
+                                'method': 'DELETE',
+                                'params': {'force': True},
+                                'auth': ('', ''),
+                                'userId': self.account
+                            }
+                            with session_scope() as session:
+                                resp, http_code = image_imageDigest(session, request_inputs=inputs, imageDigest=img_digest, bodycontent=None)
+                                if http_code not in [200, 204]:
+                                    logger.error('Could not delete image analysis: {}'.format(resp))
+                                else:
+                                    logger.info("Deleted image analysis for {} successfully".format(img_digest))
+                else:
+                    logger.info('Archive task DRY_RUN mode enabled via {}, would have archived image {}/{}'.format(DRY_RUN_ENV_VAR, self.account, img_digest))
+            except Exception as ex:
+                logger.exception('Caught unhandled exception in archive task')
+
+    def new_run(self):
+        try:
+            logger.debug('Processing globally-scoped rules')
+            with session_scope() as session:
+                rules = self._get_globals(session)
+                to_archive = self._process_rules(rules, session)
+            self._do_archive(to_archive)
+        except Exception as e:
+            logger.exception('Unexpected exception caught in global archive transition rule handling for account {}'.format(self.account))
+
+        try:
+            logger.debug('Processing account-scoped rules')
+            with session_scope() as session:
+                rules = self._get_account_rules(session)
+                to_archive = self._process_rules(rules, session)
+            self._do_archive(to_archive)
+        except Exception as e:
+            logger.exception('Unexpected exception caught in account-local archive transition rule handling for account {}'.format(self.account))
+
     def run(self):
+        return self.new_run()
+
+    def _old_run(self):
+        """
+        Older centralized function pre-global rule support.
+        :return:
+        """
         with session_scope() as session:
             rules = session.query(ArchiveTransitionRule).filter_by(account=self.account, transition=ArchiveTransitions.archive).all()
             logger.debug('Running archive transition rules: {}'.format(rules))
@@ -382,8 +503,9 @@ class ArchivedAnalysisDeleter(ImageAnalysisArchiver):
 
     def run(self):
         with session_scope() as session:
-            logger.debug('Running archive deletion rules')
+            logger.debug('Evaluating archive deletion rules for account: {}'.format(self.account))
             rules = session.query(ArchiveTransitionRule).filter_by(account=self.account, transition=ArchiveTransitions.delete).all()
+
             def lookup_archived_tags(account, digest):
                 img = session.query(ArchivedImage).filter_by(account=account, imageDigest=digest).one_or_none()
                 return img.tags()
@@ -392,16 +514,16 @@ class ArchivedAnalysisDeleter(ImageAnalysisArchiver):
 
             for rule in rules:
                 matches = self._find_candidates(session, rule)
-                logger.info('Rule: {} matches {}'.format(rule, matches))
+                logger.info('Rule: {} matches {}'.format(rule, [x[0] for x in matches]))
                 delete_merger.add_rule_result(rule, matches)
 
             to_delete = delete_merger.full_matched_digests()
 
         for img_digest in to_delete:
-            logger.info('Archiving image {}/{}', self.account, img_digest)
+            logger.info('Deleting archived image analysis {}/{}'.format(self.account, img_digest))
             try:
                 if not DRY_RUN_MODE:
-                    t = DeleteArchivedImageTask(account=self.account, image_digest=img_digest)
+                    t = DeleteArchivedImageTask(account=self.account, image_digest=img_digest, parent_task_id=self.task_id)
                     status, msg = t.run()
                     logger.info('Archive deletion task result: status={}, detail={}'.format(status, msg))
                 else:
@@ -410,6 +532,7 @@ class ArchivedAnalysisDeleter(ImageAnalysisArchiver):
                             DRY_RUN_ENV_VAR, self.account, img_digest))
             except Exception as ex:
                 logger.exception('Caught unhandled exception in archive deletion task')
+
 
     def _find_candidates(self, session: Session, rule: ArchiveTransitionRule):
         """
@@ -545,181 +668,6 @@ class ArchiveTransitionTask(object):
             logger.exception('Unhandled exception caught from analysis archive deleter')
 
 
-    #     with session_scope() as session:
-    #         logger.debug('Running archive transition rules')
-    #         archive_rules = session.query(ArchiveTransitionRule).filter_by(account=self.account, transition=ArchiveTransitions.archive).all()
-    #         self._run_archive_transition(session, archive_rules)
-    #
-    #     with session_scope() as session:
-    #         logger.debug('Running archive deletion rules')
-    #         delete_rules = session.query(ArchiveTransitionRule).filter_by(account=self.account, transition=ArchiveTransitions.delete).all()
-    #         self._run_archive_transition(session, delete_rules)
-    #
-    # def _run_archive_transition(self, session, rules):
-    #     def lookup_tags(account, digest):
-    #         return session.query(CatalogImageDocker).filter_by(userId=account, imageDigest=digest).all()
-    #
-    #     archive_merger = ArchiveTransitionTask.TagRuleMatchMerger(self.task_id, self.account, lookup_tags)
-    #
-    #     for rule in rules:
-    #         matches = self._find_archive_candidates(session, rule)
-    #         logger.debug('Rule: {} matches {}'.format(rule, matches))
-    #         archive_merger.add_rule_result(rule, matches)
-    #
-    #     to_archive = archive_merger.full_matched_digests()
-    #
-    #     for img_digest in to_archive:
-    #         logger.info('Archiving image {}/{}'.format(self.account, img_digest))
-    #         try:
-    #             if not DRY_RUN_MODE:
-    #                 t = ArchiveImageTask(account=self.account, image_digest=img_digest)
-    #                 status, msg = t.run()
-    #                 logger.info('Archive task result: status={}, detail={}'.format(status, msg))
-    #             else:
-    #                 logger.info('Archive task DRY_RUN mode enabled via {}, would have archived image {}/{}'.format(DRY_RUN_ENV_VAR, self.account, img_digest))
-    #         except Exception as ex:
-    #             logger.exception('Caught unhandled exception in archive task')
-    #
-    # def _run_delete_transition(self, session, rules):
-    #     def lookup_archived_tags(account, digest):
-    #         img = session.query(ArchivedImage).filter_by(account=account, imageDigest=digest).one_or_none()
-    #         return img.tags()
-    #
-    #     delete_merger = ArchiveTransitionTask.TagRuleMatchMerger(self.task_id, self.account, lookup_archived_tags)
-    #
-    #     for rule in rules:
-    #         matches = self._find_delete_candidates(session, rule)
-    #         logger.debug('Rule: {} matches {}'.format(rule, matches))
-    #         delete_merger.add_rule_result(rule, matches)
-    #
-    #     to_delete = delete_merger.full_matched_digests()
-    #
-    #     for img_digest in to_delete:
-    #         logger.info('Deleting archived analysis for image {}/{}', self.account, img_digest)
-    #         try:
-    #             if not DRY_RUN_MODE:
-    #                 t = DeleteArchivedImageTask(account=self.account, image_digest=img_digest)
-    #                 status, msg = t.run()
-    #                 logger.info('Archive deletion task result: status={}, detail={}'.format(status, msg))
-    #             else:
-    #                 logger.info('Archive deletion task DRY_RUN mode enabled via {}, would have deleted archived image {}/{}'.format(DRY_RUN_ENV_VAR, self.account, img_digest))
-    #         except Exception as ex:
-    #             logger.exception('Caught unhandled exception in archive deletion task')
-    #
-    # def _find_archive_candidates(self, session: Session, rule: ArchiveTransitionRule):
-    #     """
-    #     Perform a match of the rule to an image based on any of its tags.
-    #
-    #     For a match to occur, all specified criteria must be met: analysis time, tag selectors, and tag history
-    #
-    #     Returns: list of tags or None.
-    #     if the image does not match, return None
-    #     if the image matches but has no tags, return empty list
-    #     if the image has tags that match return list of those tags (may not be all the tags).
-    #     :param session: session for db queries
-    #     :param rule: ArchiveTransitionRule to process
-    #     :return: list of tuples (CatalogImageDocer, CatalogImage) that match the rule
-    #     """
-    #
-    #     # Filter by analyzed_at timestamp first
-    #     if rule.analysis_age_days >= 0:
-    #         # Do analysis age check.
-    #         min_time = int(time.time()) - (rule.analysis_age_days * 86400)
-    #     else:
-    #         min_time = 0
-    #
-    #     if rule.selector_registry:
-    #         registries = [rule.selector_registry]
-    #     else:
-    #         registries = None
-    #
-    #     if rule.selector_repository:
-    #         repositories = [rule.selector_repository]
-    #     else:
-    #         repositories = None
-    #
-    #     if rule.selector_tag:
-    #         tags = [rule.selector_tag]
-    #     else:
-    #         tags = None
-    #
-    #     tag_histories_qry = db_catalog_image_docker.get_tag_histories(session, self.account, registries=registries, repositories=repositories, tags=tags)
-    #
-    #     if min_time > 0:
-    #         tag_histories_qry = tag_histories_qry.filter(CatalogImage.analyzed_at < min_time)
-    #
-    #     return self._evaluate_tag_history(rule, tag_histories_qry)
-    #
-    # def _find_delete_candidates(self, session: Session, rule: ArchiveTransitionRule):
-    #     """
-    #     Perform a match of the rule to an image based on any of its tags, but scanning the archived data set instead of the working ste.
-    #
-    #     For a match to occur, all specified criteria must be met: analysis time, tag selectors, and tag history
-    #
-    #     Returns: list of tags or None.
-    #     if the image does not match, return None
-    #     if the image matches but has no tags, return empty list
-    #     if the image has tags that match return list of those tags (may not be all the tags).
-    #     :param session: session for db queries
-    #     :param rule: ArchiveTransitionRule to process
-    #     :return: list of tuples (ArchivedImageDocer, ArchivedImage) that match the rule
-    #     """
-    #
-    #     # Filter by analyzed_at timestamp first
-    #     if rule.analysis_age_days >= 0:
-    #         # Do analysis age check.
-    #         min_time = int(time.time()) - (rule.analysis_age_days * 86400)
-    #     else:
-    #         min_time = 0
-    #
-    #     if rule.selector_registry:
-    #         registries = [rule.selector_registry]
-    #     else:
-    #         registries = None
-    #
-    #     if rule.selector_repository:
-    #         repositories = [rule.selector_repository]
-    #     else:
-    #         repositories = None
-    #
-    #     if rule.selector_tag:
-    #         tags = [rule.selector_tag]
-    #     else:
-    #         tags = None
-    #
-    #     tag_histories_qry = db_archived_images.get_tag_histories(session, self.account, registries=registries, repositories=repositories, tags=tags)
-    #
-    #     if min_time > 0:
-    #         tag_histories_qry = tag_histories_qry.filter(ArchivedImage.created_at < min_time)
-    #
-    #     return self._evaluate_tag_history(rule, tag_histories_qry)
-    #
-    # def _evaluate_tag_history(self, rule, image_tuple_generator):
-    #     candidates = []
-    #     current_tag = None
-    #     history_depth = 0
-    #
-    #     for tag_rec, image in image_tuple_generator:
-    #         logger.debug('Checking tag: {}, image: {}'.format(tag_rec, image))
-    #         if not current_tag:
-    #             current_tag = tag_rec
-    #             history_depth = 0
-    #
-    #         if tag_rec.registry != current_tag.registry or tag_rec.repo != current_tag.repo or tag_rec.tag != current_tag.tag:
-    #             #  No match, this is a new tag, so reset depth
-    #             current_tag = tag_rec
-    #             history_depth = 0
-    #
-    #         # No depth required or at-or-beyond specified depth, the this is a candidate
-    #         if rule.tag_versions_newer < 0 or rule.tag_versions_newer <= history_depth:
-    #             candidates.append((tag_rec, image))
-    #
-    #         history_depth += 1
-    #         current_tag = tag_rec
-    #
-    #     return candidates
-
-
 class LifecycleAction(object):
     def __init__(self, account, digest, tag, matched_rule):
         self.account = account
@@ -729,7 +677,7 @@ class LifecycleAction(object):
 
 
 class DeleteArchivedImageTask(object):
-    def __init__(self, account=None, image_digest=None):
+    def __init__(self, account=None, image_digest=None, parent_task_id=None):
         self.initiated = datetime.datetime.utcnow()
         self.started = None
         self.stopped = None
@@ -737,15 +685,20 @@ class DeleteArchivedImageTask(object):
         self.image_digest = image_digest
         self.archive_record = None
         self.archive_detail_records = None
+        self.parent_task_id = parent_task_id
+        self.id = uuid.uuid4().hex
 
     def run(self):
         logger.debug("Starting archive deletion process for image {}".format(self.image_digest))
         self.started = datetime.datetime.utcnow()
 
         try:
-            self._execute()
-        except:
+            result = self._execute()
+            add_event(ImageArchiveDeleted(self.account, self.image_digest, self.id))
+            return result
+        except Exception as err:
             logger.exception('Failed archive deletion execution')
+            add_event(ImageArchiveDeleteFailed(self.account, self.image_digest, task_id=self.id, err=str(err)))
             raise
         finally:
             self.stopped = datetime.datetime.utcnow()
@@ -757,7 +710,7 @@ class DeleteArchivedImageTask(object):
         The final record delete (the ArchivedImage records) are deleted later with gc passes to leave them in the 'deleted' state
         for a while so users can see the transition.
 
-        :return:
+        :return: (status, msg) tuple
         """
         with session_scope() as session:
             rec = db_archived_images.get(session, self.account, self.image_digest)
@@ -780,6 +733,8 @@ class DeleteArchivedImageTask(object):
         with session_scope() as session:
             logger.debug('Deleting archive records for {}/{}'.format(self.account, self.image_digest))
             db_archived_images.delete(session, self.account, [self.image_digest])
+
+        return 'deleted', 'Archive deleted successfully'
 
 
 class RestoreArchivedImageTask(object):
@@ -805,8 +760,10 @@ class RestoreArchivedImageTask(object):
         try:
             self._execute()
             logger.debug('Cleanly executed archive execute function')
+            add_event(ImageRestored(self.account, self.image_digest))
         except:
             logger.exception('Error executing restore of image analysis from archive')
+            add_event(ImageRestoreFailed(self.account, self.image_digest))
             raise
         finally:
             self.stopped = datetime.datetime.utcnow()
@@ -870,10 +827,12 @@ class RestoreArchivedImageTask(object):
                 details = []
 
             c = CatalogImage()
+            img_record['userId'] = self.account
             c.update(img_record)
             session.add(c)
 
             for detail in details:
+                detail['userId'] = self.account
                 tr = CatalogImageDocker()
                 tr.update(detail)
                 session.add(tr)
@@ -891,7 +850,8 @@ class RestoreArchivedImageTask(object):
                 if r_type == 'policy_evaluation':
                     try:
                         with session_scope() as session:
-                            db_policyeval.add_all_for_digest([record], session)
+                            record['userId'] = self.account
+                            db_policyeval.add_all_for_digest(self.account, [record], session)
                     except Exception as ex:
                         logger.warn('Could not insert records of type: {} due to exception: {}'.format(r_type, ex))
                         continue
@@ -924,6 +884,50 @@ class RestoreArchivedImageTask(object):
         except Exception as ex:
             logger.exception("Error flushing policy engine state for image")
             raise ex
+
+
+class RestoreArchivedImageTaskFromArchiveTarfile(RestoreArchivedImageTask):
+    def __init__(self, account=None, image_digest=None, fileobj=None, parent_task_id=None):
+        self.id = uuid.uuid4().hex
+        self.parent_id = parent_task_id
+        self.initiated = datetime.datetime.utcnow()
+        self.started = None
+        self.stopped = None
+        self.account = account
+        self.image_digest = image_digest
+        self.fileobj = fileobj
+
+    def _execute(self):
+        # if image record already exists, exit.
+        with session_scope() as session:
+            if db_catalog_image.get(self.image_digest, self.account, session):
+                logger.info('Image archive restore found existing image records already. Aborting restore.')
+                raise Exception('Conflict: Image already exists in system. No restore possible')
+
+        dest_obj_mgr = object_store.get_manager()
+
+        # Load the archive manifest
+        m = self.fileobj.read()
+
+        if m:
+            tf = tempfile.NamedTemporaryFile(prefix='analysis_archive_{}'.format(self.image_digest), dir=localconfig.get_config()['tmp_dir'], delete=False)
+            try:
+                tf.write(ensure_bytes(m))
+                tf.close()
+
+                # Load the archive from the temp file
+                with ImageArchive.for_reading(tf.name) as img_archive:
+
+                    logger.debug('Using manifest: {}'.format(img_archive.manifest))
+
+                    self.restore_artifacts(img_archive, dest_obj_mgr)
+                    self.restore_records(img_archive.manifest)
+                    self._reload_policy_engine(img_archive.manifest)
+            finally:
+                os.remove(tf.name)
+
+        else:
+            raise Exception('No archive manifest found in archive record. Cannot restore')        
 
 
 class ArchiveImageTask(object):
@@ -993,6 +997,7 @@ class ArchiveImageTask(object):
                     img = session.add(img)
 
         except Exception as ex:
+            add_event(ImageArchivingFailed(self.account, self.image_digest, self.id, err=str(ex)))
             return 'error', str(ex)
 
         try:
@@ -1071,8 +1076,8 @@ class ArchiveImageTask(object):
                     record.archive_size_bytes = size
                     record.status = 'archived'
 
+                    add_event(ImageArchived(self.account, self.image_digest, self.id))
                     return record.status, 'Completed successfully'
-
             except Exception as ex:
                 record.status = 'error'
 
@@ -1085,6 +1090,7 @@ class ArchiveImageTask(object):
                         logger.warn('Could not delete the analysis archive tarball in storage. May have leaked. Err: {}'.format(ex))
 
                 session.delete(record)
+                add_event(ImageArchivingFailed(self.account, self.image_digest, self.id, err=str(ex)))
                 return 'error', str(ex)
 
     def archive_required(self, src_mgr: ObjectStorageManager, artifacts: list, img_archive: ImageArchive) -> list:

@@ -5,7 +5,7 @@ Base types for all anchore engine services
 import copy
 import connexion
 import enum
-from flask import g
+from flask import g, jsonify
 import json
 import os
 from pathlib import Path
@@ -22,9 +22,12 @@ from anchore_engine import monitors
 from anchore_engine.db import db_services, session_scope, initialize as initialize_db
 from anchore_engine.subsys.identities import manager_factory
 from anchore_engine.apis.authorization import init_authz_handler, get_authorizer
-from anchore_engine.subsys.events import ServiceAuthzPluginHealthCheckFail
+from anchore_engine.subsys.events import ServiceAuthzPluginHealthCheckFailed
 from anchore_engine.clients.services import internal_client_for
 from anchore_engine.clients.services.catalog import CatalogClient
+from anchore_engine.configuration.localconfig import OauthNotConfiguredError, InvalidOauthConfigurationError
+from anchore_engine.apis.exceptions import AnchoreApiError
+from anchore_engine.common.helpers import make_response_error
 
 
 class LifeCycleStages(enum.IntEnum):
@@ -57,6 +60,15 @@ _default_lifecycle_handlers = {
             LifeCycleStages.pre_register: [],
             LifeCycleStages.post_register: []
     }
+
+
+def handle_api_exception(ex: AnchoreApiError):
+    """
+    Returns the proper json for marshalling an AnchoreApiError
+    :param ex:
+    :return:
+    """
+    return jsonify(make_response_error(ex.message, in_httpcode=ex.__response_code__, details=ex.detail if ex.detail else {})), ex.__response_code__
 
 
 class ServiceMeta(type):
@@ -294,18 +306,23 @@ class BaseService(object, metaclass=ServiceMeta):
         if self.require_system_user:
             gotauth = False
             max_retries = 60
+            self.global_configuration['system_user_auth'] = (None, None)
             for count in range(1, max_retries):
                 try:
                     with session_scope() as dbsession:
                         mgr = manager_factory.for_session(dbsession)
-                        self.global_configuration['system_user_auth'] = mgr.get_system_credentials()
-
-                    if self.global_configuration['system_user_auth'] != (None, None):
+                        logger.info('Checking system creds')
+                        c = mgr.get_system_credentials()
+                    if c is not None:
+                        logger.info('Found valid system creds')
                         gotauth = True
                         break
                     else:
+                        logger.info('Did not find valid system creds')
                         logger.error('cannot get system user auth credentials yet, retrying (' + str(count) + ' / ' + str(max_retries) + ')')
                         time.sleep(5)
+                except InvalidOauthConfigurationError:
+                    raise
                 except Exception as err:
                     logger.exception('cannot get system-user auth credentials - service may not have system level access')
                     self.global_configuration['system_user_auth'] = (None, None)
@@ -493,18 +510,30 @@ class ApiService(BaseService):
         """
 
         try:
-            self._application = connexion.FlaskApp(__name__, specification_dir=api_spec_dir)
+
+            enable_swagger_ui = False
+            if self.configuration.get('enable_swagger_ui', None) is not None:
+                enable_swagger_ui = self.configuration.get('enable_swagger_ui')
+            elif self.global_configuration.get('enable_swagger_ui', None) is not None:
+                enable_swagger_ui = self.global_configuration.get('enable_swagger_ui')
+                
+            flask_app_options = {'swagger_ui': enable_swagger_ui}
+            self._application = connexion.FlaskApp(__name__, specification_dir=api_spec_dir, options=flask_app_options)
             flask_app = self._application.app
             flask_app.url_map.strict_slashes = False
 
-            # Setup some debug logging
+            # Ensure jsonify() calls add whitespace for nice error responses
+            flask_app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+
+            # Suppress some verbose logs in dependencies
             import logging as py_logging
             py_logging.basicConfig(level=py_logging.ERROR)
 
-            # Intialize the authentication system
+            # Initialize the authentication system
             self.init_auth()
 
             flask_app.before_request(self._inject_service)
+            flask_app.register_error_handler(AnchoreApiError, handle_api_exception)
 
             metrics.init_flask_metrics(flask_app, servicename=service_name)
             self._application.add_api(Path(api_spec_file), validate_responses=self.options.get('validate-responses'))
@@ -568,12 +597,12 @@ class ApiService(BaseService):
                     result = False
 
                 if not result:
-                    fail_event = ServiceAuthzPluginHealthCheckFail(user_id=localconfig.ADMIN_ACCOUNT_NAME,
-                                                                   name=service_name,
-                                                                   host=host_id,
-                                                                   plugin=handler,
-                                                                   details=str(ex)
-                                                                   )
+                    fail_event = ServiceAuthzPluginHealthCheckFailed(user_id=localconfig.ADMIN_ACCOUNT_NAME,
+                                                                     name=service_name,
+                                                                     host=host_id,
+                                                                     plugin=handler,
+                                                                     details=str(ex)
+                                                                     )
                     logger.info('Sending healthcheck failure event: {}'.format(fail_event.__event_type__))
 
                     try:
@@ -595,6 +624,7 @@ class UserFacingApiService(ApiService):
     def __init__(self, options=None):
         super().__init__(options)
         self._authz_actions = {}
+        self.api_spec = None
 
     def _register_instance_handlers(self):
         super()._register_instance_handlers()
@@ -604,7 +634,7 @@ class UserFacingApiService(ApiService):
     def parse_swagger(path):
         with open(path) as f:
             if path.endswith('yaml') or path.endswith('yml'):
-                return yaml.load(f)
+                return yaml.load(f, Loader=yaml.FullLoader)
             else:
                 return json.load(f)
 
@@ -633,8 +663,8 @@ class UserFacingApiService(ApiService):
 
     def _process_api_spec(self):
         try:
-            swagger_content = UserFacingApiService.parse_swagger(os.path.join(self.__spec_dir__, self.__spec_file__))
-            actions = UserFacingApiService.build_action_map(swagger_content)
+            self.api_spec = UserFacingApiService.parse_swagger(os.path.join(self.__spec_dir__, self.__spec_file__))
+            actions = UserFacingApiService.build_action_map(self.api_spec)
             missing = [x for x in filter(lambda x: x[1] is None, actions.items())]
             if missing:
                 raise Exception('API Spec validation error: All operations must have a x-anchore-authz-action label. Missing for: {}'.format(missing))

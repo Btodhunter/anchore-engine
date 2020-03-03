@@ -1,7 +1,7 @@
 swagger: "2.0"
 info:
   description: "This is a policy evaluation service. It receives push-events from external systems for data updates and provides an api for requesting image policy checks"
-  version: "1.0.0"
+  version: "1.0.1"
   title: "anchore_engine.services.policy_engine"
   contact:
     email: "zach@anchore.com"
@@ -12,11 +12,7 @@ basePath: "/"
 schemes:
 - https
 - http
-securityDefinitions:
-  anchore_basic:
-    type: basic
-security:
-  - anchore_basic: []
+
 paths:
   /evaluation_cache/status:
     get:
@@ -256,7 +252,9 @@ paths:
       parameters:
       - name: "id"
         in: "query"
-        type: string
+        type: array
+        items:
+          type: string
         required: true
       - name: "affected_package"
         in: "query"
@@ -265,6 +263,12 @@ paths:
       - name: "affected_package_version"
         in: "query"
         type: string
+        required: false
+      - name: namespace
+        in: query
+        type: array
+        items:
+          type: string
         required: false
       responses:
         200:
@@ -385,6 +389,38 @@ paths:
             $ref: "#/definitions/PolicyEvaluation"
         404:
           description: "User id not found in this service"
+  /users/{user_id}/images/{image_id}/artifacts/{artifact_type}:
+    get:
+      x-swagger-router-controller: anchore_engine.services.policy_engine.api.controllers.synchronous_operations
+      operationId: list_artifacts
+      summary: Return a list of analyzer artifacts of the specified type
+      produces:
+      - application/json
+      parameters:
+      - name: "user_id"
+        in: "path"
+        type: string
+        description: "user id string of catalog user"
+        required: true
+      - name: "image_id"
+        in: path
+        type: string
+        required: true
+      - name: artifact_type
+        in: path
+        required: true
+        type: string
+        enum:
+          - retrieved_files
+          - secret_search
+          - file_content_search
+      responses:
+        200:
+          description: "List of file metadata objects"
+          schema:
+            $ref: "#/definitions/ArtifactList"
+        404:
+          description: "Image not found in this service"
   /validate_bundle:
     post:
       x-swagger-router-controller: anchore_engine.services.policy_engine.api.controllers.synchronous_operations
@@ -1141,3 +1177,8 @@ definitions:
       enabled:
         type: boolean
         description: Is evaluation caching enabled on this node
+  ArtifactList:
+    type: array
+    description: Simple array of RetrievedFileMetadata objects
+    items:
+      type: object

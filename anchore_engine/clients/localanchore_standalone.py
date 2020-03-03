@@ -8,6 +8,8 @@ import uuid
 import shutil
 import tarfile
 import copy 
+import time
+import treelib
 
 import yaml
 from pkg_resources import resource_filename
@@ -16,7 +18,6 @@ import anchore_engine.configuration
 import anchore_engine.common
 import anchore_engine.auth.common
 import anchore_engine.clients.skopeo_wrapper
-#from anchore.anchore_utils import read_kvfile_todict
 import anchore_engine.common.images
 from anchore_engine.analyzers.utils import read_kvfile_todict
 from anchore_engine.utils import AnchoreException
@@ -211,148 +212,209 @@ def get_tar_filenames(layertar):
 
     return(ret)
 
+def tree_id(id):
+    toks = id.split('/')
+    return(toks[-1], id, '/'.join(toks[:-1]))
+
+def tree_create_branch(ftree, id, data, stree=None, populate_intermediate_nodes=False):
+    ftoks = id.split("/")
+
+    for i in range(1, len(ftoks)):
+        (fname, fid, fparent) = tree_id('/'.join(ftoks[0:i]))
+
+        if not ftree.get_node(fid):
+            idata = {}
+            if populate_intermediate_nodes:
+                idata.update(data)
+            ftree.create_node(fname, fid, parent=fparent, data=idata)
+            if stree and stree.get_node(fid):
+                ftree[fid].data.update(stree[fid].data)
+    
+    (fname, fid, fparent) = tree_id(id)
+    if not ftree.get_node(fid):
+        ftree.create_node(fname, fid, parent=fparent, data=data)
+
 def squash(unpackdir, cachedir, layers):
     rootfsdir = unpackdir + "/rootfs"
 
     if os.path.exists(unpackdir + "/squashed.tar"):
         return (True)
+    
 
-    whpatt = re.compile("\.wh\..*")
-    whopqpatt = re.compile("\.wh\.\.wh\.\.opq")
-
+    tree_time = time.time()
+    ftree = treelib.Tree()
+    ftree.create_node("", "", data={'latest_layer_tar': "", 'exists': True})
     tarfiles = {}
-    fhistory = {}
-    try:
+    tarfiles_members = {}
+    whpatt = re.compile(r"\.wh\..*")
+    whopqpatt = re.compile(r"\.wh\.\.wh\.\.opq")
+    slashprefixpatt = re.compile(r"^/+|\.+/+")
+    deferred_hardlinks_destination = {}
+    hardlink_destinations = {}
+    try:    
         logger.debug("Layers to process: {}".format(layers))
-
         logger.debug("Pass 1: generating layer file timeline")
-        deferred_hardlinks_destination = {}
-        hardlink_destinations = {}
-
         for l in layers:
             htype, layer = l.split(":",1)
-            layertar = get_layertarfile(unpackdir, cachedir, layer)
-            ltf = None
-            try:
-                lfhistory = {}
-                deferred_hardlinks = {}
+            #layertar = os.path.join(copydir, layer)
+            layertar = get_layertarfile(unpackdir, cachedir, layer)        
+            logger.debug("processing layer {} - {}".format(l, layertar))
+            tarfiles[l] = tarfile.open(layertar, mode='r', format=tarfile.PAX_FORMAT)
+            tarfiles_members[l] = {}
+            layerfiles = []
+            lftree = treelib.Tree()
+            lftree.create_node("", "", data={'latest_layer_tar': "", 'exists': True})
 
-                logger.debug("processing layer {} - {}".format(l, layertar))
-                tarfiles[l] = tarfile.open(layertar, mode='r', format=tarfile.PAX_FORMAT)
-                for member in tarfiles[l].getmembers():
-                    filename = member.name
-                    if filename not in lfhistory:
-                        lfhistory[filename] = {}
+            for member in tarfiles[l].getmembers():
+                # clean up any prefix on the member names for history tracking purposes
+                tarfilename = member.name
+                member.name = slashprefixpatt.sub("", member.name)
+                if member.islnk() and member.linkname:
+                    member.linkname = slashprefixpatt.sub("", member.linkname)
+                    member.linkpath = member.linkname
+                member.pax_headers['path'] = member.name
 
-                    lfhistory[filename]['latest_layer_tar'] = l
-                    lfhistory[filename]['exists'] = True
+                # regular processing starts here
+                tarfiles_members[l][member.name] = member
+                filename = member.name
+                tree_create_branch(lftree, filename, {'latest_layer_tar': l, 'exists': True}, stree=ftree, populate_intermediate_nodes=True)
 
-                    if whopqpatt.match(os.path.basename(filename)):
-                        # never include the wh itself
-                        lfhistory[filename]['exists'] = False
+                ftoks = filename.split("/")
+                #logger.debug("FILENAME: {} {}".format(filename, time.time()))
+                for i in range(1, len(ftoks)):
+                    f = ftoks[0:i][-1]
+                    parent = "/".join(ftoks[0:i-1])
+                    b = "/".join(ftoks[0:i])
 
-                        # found an opq entry, which means that this files in the next layer down (only) should not be included
-                        fsub = re.sub(r"\.wh\.\.wh\.\.opq", "", filename, 1)
-                        fsub = re.sub("/+$","", fsub)
+                    if not lftree.get_node(b):
+                        lftree.create_node(f, b, parent=p, data={'latest_layer_tar': l, 'exists': True})
 
-                        for other_filename in fhistory.keys():
-                            if re.match("^{}/".format(re.escape(fsub)), other_filename):
-                                #fhistory[other_filename]['exists'] = False
-                                if other_filename not in lfhistory:
-                                    lfhistory[other_filename] = {}
-                                    lfhistory[other_filename].update(fhistory[other_filename])
-                                lfhistory[other_filename]['exists'] = False
+                    lftree[b].data['latest_layer_tar'] = l
+                    lftree[b].data['exists'] = True
+
+                f = ftoks[-1]
+                parent = "/".join(ftoks[0:-1])
+                if not lftree.get_node(filename):
+                    lftree.create_node(f, filename, parent=parent, data={'latest_layer_tar': l, 'exists': True})
+
+                lftree[filename].data['latest_layer_tar'] = l
+                lftree[filename].data['exists'] = True
+
+                if whopqpatt.match(os.path.basename(filename)):
+                    lftree[filename].data['exists'] = False
+                    fsub = re.sub(r"\.wh\.\.wh\.\.opq", "", filename, 1)
+                    fsub = re.sub("/+$","", fsub)
+
+                    if not lftree.get_node(fsub):
+                        (fname, fid, fparent) = tree_id(fsub)
+                        lftree.create_node(fname, fid, parent=fparent, data={})
+                        if ftree.get_node(fsub):
+                            lftree[fsub].data.update(ftree[fsub].data)
+
+                    parent_node = ftree.get_node(fsub)
+                    if parent_node:
+                        for n in ftree.expand_tree(nid=fsub):
+                            if not lftree.get_node(n):
+                                (fname, fid, fparent) = tree_id(n)
+                                lftree.create_node(fname, fid, parent=fparent, data={})
+                                lftree[fid].data.update(ftree[fid].data)
+                            if n != fsub:
+                                lftree[n].data['exists'] = False
+
+                elif whpatt.match(os.path.basename(filename)):
+                    logger.debug("WH handler {} {}".format(filename, time.time()))
+                    # never include the wh itself
+                    lftree[filename].data['exists'] = False
+
+                    fsub = re.sub(r"\.wh\.", "", filename, 1)
+                    if not lftree.get_node(fsub):
+                        (fname, fid, fparent) = tree_id(fsub)
+                        lftree.create_node(fname, fid, parent=fparent, data={})
+                        if ftree.get_node(fsub):
+                            lftree[fsub].data.update(ftree[fsub].data)
+
+                    lftree[fsub].data['exists'] = False
+
+                    parent_node = ftree.get_node(fsub)
+                    if parent_node:
+                        for n in ftree.expand_tree(nid=fsub):
+                            if not lftree.get_node(n):
+                                (fname, fid, fparent) = tree_id(n)
+                                lftree.create_node(fname, fid, parent=fparent, data={})
+                                lftree[fid].data.update(ftree[fid].data)
+
+                            lftree[n].data['exists'] = False
+
+                if lftree[filename].data['exists'] and member.islnk():
+                    el = {
+                        'hl_target_layer': l,
+                        'hl_target_name': member.linkname,
+                        'hl_replace': False,
+                    }
+                    lftree[filename].data.update(el)
+                    if member.linkname not in hardlink_destinations:
+                        hardlink_destinations[member.linkname] = []
+                    el = {
+                        'filename': filename,
+                        'layer': l,
+                    }
+                    hardlink_destinations[member.linkname].append(el)
 
 
-                    elif whpatt.match(os.path.basename(filename)):
-                        # never include the wh itself
-                        lfhistory[filename]['exists'] = False
+            for filename in lftree.expand_tree():
+                if filename in hardlink_destinations:
+                    for el in hardlink_destinations[filename]:
+                        if el['layer'] != l:
+                            if not lftree.get_node(el['filename']):
+                                tree_create_branch(lftree, el['filename'], ftree[el['filename']].data, stree=ftree)
+                            lftree[el['filename']].data['hl_replace'] = True
 
-                        fsub = re.sub(r"\.wh\.", "", filename, 1)
-                        if fsub not in lfhistory:
-                            lfhistory[fsub] = {}
-                            if fsub in fhistory:
-                                lfhistory[fsub].update(fhistory[fsub])
-                        lfhistory[fsub]['exists'] = False
+            for n in lftree.expand_tree():
+                if not ftree.get_node(n):
+                    (fname, fid, fparent) = tree_id(n)
+                    ftree.create_node(fname, fid, parent=fparent, data={})
+                ftree[n].data.update(lftree[n].data)
 
-                        for other_filename in fhistory.keys():
-                            if re.match("^{}/".format(re.escape(fsub)), other_filename):
-                                #fhistory[other_filename]['exists'] = False
-                                if other_filename not in lfhistory:
-                                    lfhistory[other_filename] = {}
-                                    lfhistory[other_filename].update(fhistory[other_filename])
-                                lfhistory[other_filename]['exists'] = False
 
-                    if lfhistory[filename]['exists'] and member.islnk():
-                        el = {
-                            'hl_target_layer': l,
-                            'hl_target_name': member.linkname,
-                            'hl_replace': False,
-                        }
-                        lfhistory[filename].update(el)
-                        if member.linkname not in hardlink_destinations:
-                            hardlink_destinations[member.linkname] = []
-                        el = {
-                            'filename': filename,
-                            'layer': l,
-                        }
-                        hardlink_destinations[member.linkname].append(el)
 
-                for filename in list(lfhistory.keys()):
-                    if filename in hardlink_destinations:
-                        for el in hardlink_destinations[filename]:
-                            if el['layer'] != l:
-                                if el['filename'] not in lfhistory:
-                                    lfhistory[el['filename']] = {}
-                                    lfhistory[el['filename']].update(fhistory[el['filename']])
-                                lfhistory[el['filename']]['hl_replace'] = True
-
-                fhistory.update(lfhistory)
-
-            except Exception as err:
-                logger.error("layer handler failure - exception: {}".format(err))
-                raise(err)
 
         logger.debug("Pass 2: creating squashtar from layers")
         allexcludes = []
-        with tarfile.open(os.path.join(unpackdir, "squashed.tar"), mode='w', format=tarfile.PAX_FORMAT) as oltf:
+        with tarfile.open(os.path.join(unpackdir, "squashed.tar"), mode='w', format=tarfile.PAX_FORMAT) as oltf:        
             imageSize = 0
             deferred_hardlinks = {}
-            added_members = {}
-            for filename in fhistory.keys():
-                if fhistory[filename]['exists']:
-                    l = fhistory[filename]['latest_layer_tar']
-                    member = tarfiles[l].getmember(filename)
-                    if member.isreg():
-                        memberfd = tarfiles[l].extractfile(member)
-                        oltf.addfile(member, fileobj=memberfd)
-                        added_members[filename] = fhistory[filename]
-                    elif member.islnk():
-                        if fhistory[filename]['hl_replace']:
-                            deferred_hardlinks[filename] = fhistory[filename]
+
+            for l in tarfiles_members.keys():
+                for filename in tarfiles_members[l].keys():
+                    if ftree[filename].data['exists'] and ftree[filename].data['latest_layer_tar'] == l:
+                        member = tarfiles_members[l].get(filename)
+                        if member.isreg():
+                            memberfd = tarfiles[l].extractfile(member)
+                            oltf.addfile(member, fileobj=memberfd)
+                        elif member.islnk():
+                            if ftree[filename].data['hl_replace']:
+                                deferred_hardlinks[filename] = ftree[filename].data
+                            else:
+                                oltf.addfile(member)
                         else:
                             oltf.addfile(member)
-                            added_members[filename] = fhistory[filename]                        
-                    else:
-                        oltf.addfile(member)
-                        added_members[filename] = fhistory[filename]
 
             for filename in deferred_hardlinks.keys():
-                l = fhistory[filename]['latest_layer_tar']
-                member = tarfiles[l].getmember(filename)
-                logger.debug("deferred hardlink {}".format(fhistory[filename]))
+                l = ftree[filename].data['latest_layer_tar']
+                member = tarfiles_members[l].get(filename)
+                logger.debug("deferred hardlink {}".format(ftree[filename].data))
                 try:
                     logger.debug("attempt to lookup deferred {} content source".format(filename))
-                    content_layer = fhistory[filename]['hl_target_layer']
-                    content_filename = fhistory[filename]['hl_target_name']
+                    content_layer = ftree[filename].data['hl_target_layer']
+                    content_filename = ftree[filename].data['hl_target_name']
 
                     logger.debug("attempt to extract deferred {} from layer {} (for lnk {})".format(content_filename, content_layer, filename))
-                    content_member = tarfiles[content_layer].getmember(content_filename)
+                    content_member = tarfiles_members[content_layer].get(content_filename)
                     content_memberfd = tarfiles[content_layer].extractfile(content_member)
-                    
+
                     logger.debug("attempt to construct new member for deferred {}".format(filename))
                     new_member = copy.deepcopy(content_member)
-                    
+
                     new_member.name = member.name
                     new_member.pax_headers['path'] = member.name
 
@@ -361,24 +423,7 @@ def squash(unpackdir, cachedir, layers):
                 except Exception as err:
                     import traceback
                     traceback.print_exc()
-                    logger.warn("failed to store hardlink ({} -> {}) - exception: {}".format(member.name, member.linkname, err))
-
-                if False:
-                    if member.linkname not in added_members:
-                        logger.debug("caught dangling hardlink, attempting to handle: {} -> {}".format(filename, member.linkname))
-                        if member.linkname in fhistory:
-                            newl = fhistory[member.linkname]['latest_layer_tar']
-                            newmember = tarfiles[l].getmember(member.linkname)
-                            newmemberfd = tarfiles[l].extractfile(member.linkname)
-                            newmember.name = filename
-                            oltf.addfile(newmember, fileobj=newmemberfd)
-                            added_members[filename] = fhistory[filename]
-                            logger.debug("handled dangling hardlink: {} -> {}".format(filename, member.linkname))
-                        else:
-                            logger.warn("failed to handle dangling hardlink, skipping inclusion in final: {} -> {}".format(filename, member.linkname))
-                    else:
-                        oltf.addfile(member)
-                        added_members[filename] = fhistory[filename]
+                    logger.warn("failed to store hardlink ({} -> {}) - exception: {}".format(member.name, member.linkname, err))    
 
     finally:
         logger.debug("Pass 3: closing layer tarfiles")
@@ -388,13 +433,13 @@ def squash(unpackdir, cachedir, layers):
                     tarfiles[l].close()
                 except Exception as err:
                     logger.error("failure closing tarfile {} - exception: {}".format(l, err))
-
+                    
     imageSize = 0
     if os.path.exists(os.path.join(unpackdir,"squashed.tar")):
         imageSize = os.path.getsize(os.path.join(unpackdir, "squashed.tar"))
 
     return ("done", imageSize)
-
+                
 
 def make_staging_dirs(rootdir, use_cache_dir=None):
     if not os.path.exists(rootdir):
@@ -422,6 +467,31 @@ def make_staging_dirs(rootdir, use_cache_dir=None):
 
     return(ret)
 
+def _rmtree_error_handler(infunc, inpath, inerr):
+    (cls, exc, trace) = inerr
+    try:
+        # attempt to change the permissions and then retry removal
+        os.chmod(inpath, 0o777)
+    except Exception as err:
+        logger.warn("unable to change permissions in error handler for path {} in shutil.rmtree".format(inpath))
+    finally:
+        try:
+            infunc(inpath)
+        except Exception as err:
+            logger.debug("unable to remove in error handler for path {} - this will be retried".format(err))
+
+
+def rmtree_force(inpath):
+
+    if os.path.exists(inpath):
+        try:
+            shutil.rmtree(inpath, False, _rmtree_error_handler)
+        finally:
+            if os.path.exists(inpath):
+                shutil.rmtree(inpath)
+
+    return(True)
+
 def delete_staging_dirs(staging_dirs):
     for k in list(staging_dirs.keys()):
         if k == 'cachedir':
@@ -433,7 +503,7 @@ def delete_staging_dirs(staging_dirs):
             try:
                 if os.path.exists(staging_dirs[k]):
                     logger.debug("removing dir: " + k + " : " + str(staging_dirs[k]))
-                    shutil.rmtree(staging_dirs[k])
+                    rmtree_force(staging_dirs[k])
             except Exception as err:
                 raise Exception("unable to delete staging directory - exception: " + str(err))
         else:
@@ -441,7 +511,7 @@ def delete_staging_dirs(staging_dirs):
 
     return(True)
 
-def pull_image(staging_dirs, pullstring, registry_creds=[], manifest=None, dest_type='oci'):
+def pull_image(staging_dirs, pullstring, registry_creds=[], manifest=None, parent_manifest=None, dest_type='oci'):
     outputdir = staging_dirs['outputdir']
     unpackdir = staging_dirs['unpackdir']
     copydir = staging_dirs['copydir']
@@ -454,13 +524,14 @@ def pull_image(staging_dirs, pullstring, registry_creds=[], manifest=None, dest_
     try:
         if registry_creds:
             image_info = anchore_engine.common.images.get_image_info(None, 'docker', pullstring, registry_lookup=False)
-            user, pw, registry_verify = anchore_engine.auth.common.get_creds_by_registry(image_info['registry'], registry_creds=registry_creds)
+            user, pw, registry_verify = anchore_engine.auth.common.get_creds_by_registry(image_info['registry'], image_info['repo'], registry_creds=registry_creds)
     except Exception as err:
         raise err
 
     # download
     try:
-        rc = anchore_engine.clients.skopeo_wrapper.download_image(pullstring, copydir, user=user, pw=pw, verify=registry_verify, manifest=manifest, use_cache_dir=cachedir, dest_type=dest_type)
+        logger.info("Downloading image {} for analysis to {}".format(pullstring, copydir))
+        rc = anchore_engine.clients.skopeo_wrapper.download_image(pullstring, copydir, user=user, pw=pw, verify=registry_verify, manifest=manifest, parent_manifest=parent_manifest, use_cache_dir=cachedir, dest_type=dest_type)
     except Exception as err:
         raise err
 
@@ -533,7 +604,7 @@ def get_image_metadata_v1(staging_dirs, imageDigest, imageId, manifest_data, doc
         # get dockerfile_contents (translate history to guessed DF)
         dockerfile_contents = "FROM scratch\n"
         for hel in docker_history:
-            patt = re.match("^/bin/sh -c #\(nop\) +(.*)", hel['CreatedBy'])
+            patt = re.match(r"^/bin/sh -c #\(nop\) +(.*)", hel['CreatedBy'])
             if patt:
                 cmd = patt.group(1)
             elif hel['CreatedBy']:
@@ -563,17 +634,23 @@ def get_image_metadata_v2(staging_dirs, imageDigest, imageId, manifest_data, doc
     layers = []
     docker_history = []
     imageArch = ""
+    rawhistory = None
 
     # get "history"
-    if os.path.exists(os.path.join(copydir, imageId+".tar")):
+    image_config = None
+    for ifile in ["{}.tar".format(imageId), "{}".format(imageId)]:
+        if os.path.exists(os.path.join(copydir, ifile)):
+            image_config = os.path.join(copydir, ifile)
+            break
+
+    if (image_config):
         try:
-            with open(os.path.join(copydir, imageId+".tar"), 'r') as FH:
+            with open(image_config, 'r') as FH:
                 configdata = json.loads(FH.read())
-                rawhistory = configdata['history']
+                rawhistory = configdata.get('history', None)
                 imageArch = configdata['architecture']
                 imageOs = configdata.get('os', None)
-                if imageOs in ['windows']:
-                    raise Exception("reported os type ({}) images are not supported".format(imageOs))
+                # Possible future checks for configuration of anchore to fast fail on arch/os images that are not supported
                     
         except Exception as err:
             raise err
@@ -600,20 +677,29 @@ def get_image_metadata_v2(staging_dirs, imageDigest, imageId, manifest_data, doc
             if nfile:
                 with open(nfile, 'r') as FH:
                     configdata = json.loads(FH.read())
-                    rawhistory = configdata['history']
+                    rawhistory = configdata.get('history', None)
                     imageArch = configdata['architecture']
                     imageOs = configdata.get('os', None)
-                    if imageOs in ['windows']:
-                        raise Exception("image os type ({}) not supported".format(imageOs))
+                    # Possible future checks for configuration of anchore to fast fail on arch/os images that are not supported                    
             else:
                 raise Exception("could not find final digest - no blob config file found in digest file: {}".format(dfile))
 
         except Exception as err:
             raise err
 
+        
     try:
         done=False
         idx = 0
+
+        # add support for cases where image metadata does not contain a history element at all
+        if rawhistory is None:
+            rawhistory = []
+            for l in rawlayers:
+                ldigest = l.get('digest', 'sha256:NA').split(':')[1]
+                if os.path.exists(os.path.join(blobdir, ldigest)):
+                    rawhistory.append({})
+
         while not done:
             if not rawhistory:
                 done = True
@@ -650,9 +736,9 @@ def get_image_metadata_v2(staging_dirs, imageDigest, imageId, manifest_data, doc
                 )
 
         docker_history = hfinal
-        if hfinal:
-            with open(os.path.join(unpackdir, "docker_history.json"), 'w') as OFH:
-                OFH.write(json.dumps(hfinal))
+        with open(os.path.join(unpackdir, "docker_history.json"), 'w') as OFH:
+            OFH.write(json.dumps(docker_history))
+
     except Exception as err:
         raise err
 
@@ -660,7 +746,7 @@ def get_image_metadata_v2(staging_dirs, imageDigest, imageId, manifest_data, doc
         # get dockerfile_contents (translate history to guessed DF)
         dockerfile_contents = "FROM scratch\n"
         for hel in docker_history:
-            patt = re.match("^/bin/sh -c #\(nop\) +(.*)", hel['CreatedBy'])
+            patt = re.match(r"^/bin/sh -c #\(nop\) +(.*)", hel['CreatedBy'])
             if patt:
                 cmd = patt.group(1)
             elif hel['CreatedBy']:
@@ -700,7 +786,7 @@ def list_analyzers():
     result = []
     for f in os.listdir(analyzer_root):
         thecmd = os.path.join(analyzer_root, f)
-        if re.match(".*\.py$", thecmd):
+        if re.match(r".*\.py$", thecmd):
             result.append(thecmd)
 
     result.sort()
@@ -713,15 +799,12 @@ def run_anchore_analyzers(staging_dirs, imageDigest, imageId, localconfig):
     configdir = localconfig['service_dir']
 
     # run analyzers
-    #anchore_module_root = resource_filename("anchore", "anchore-modules")
     anchore_module_root = resource_filename("anchore_engine", "analyzers")
     analyzer_root = os.path.join(anchore_module_root, "modules")
     for f in list_analyzers():
-    #for f in os.listdir(analyzer_root):
-    #    thecmd = os.path.join(analyzer_root, f)
-    #    if re.match(".*\.py$", thecmd):
         cmdstr = " ".join([f, configdir, imageId, unpackdir, outputdir, unpackdir])
         if True:
+            timer = time.time()
             try:
                 rc, sout, serr = utils.run_command(cmdstr)
                 sout = utils.ensure_str(sout)
@@ -732,7 +815,7 @@ def run_anchore_analyzers(staging_dirs, imageDigest, imageId, localconfig):
                     logger.debug("command succeeded: cmd="+str(cmdstr)+" stdout="+str(sout).strip()+" stderr="+str(serr).strip())
             except Exception as err:
                 logger.error("command failed with exception - " + str(err))
-                #raise err
+            logger.debug("timing: specific analyzer time: {} - {}".format(f, time.time() - timer))
 
     analyzer_report = {}
     for analyzer_output in os.listdir(os.path.join(outputdir, "analyzer_output")):
@@ -780,6 +863,7 @@ def generate_image_export(staging_dirs, imageDigest, imageId, analyzer_report, i
                         'docker_history': docker_history,
                         'dockerfile_mode': dockerfile_mode,
                         'dockerfile_contents': dockerfile_contents,
+                        #'dockerfile': utils.ensure_str(base64.encodebytes(dockerfile_contents.encode('utf-8'))),
                         'layers': layers,
                         'familytree': familytree,
                         'docker_data': {
@@ -794,7 +878,19 @@ def generate_image_export(staging_dirs, imageDigest, imageId, analyzer_report, i
     )
     return(image_report)
 
-def analyze_image(userId, manifest, image_record, tmprootdir, localconfig, registry_creds=[], use_cache_dir=None):
+def get_manifest_from_staging(staging_dirs):
+    copydir = staging_dirs['copydir']
+    ret = ""
+    with open(os.path.join(copydir, 'index.json'), 'r') as FH:
+        idata = json.loads(FH.read())
+        d_digest = idata['manifests'][0]['digest'].split(":", 1)[1]
+        dfile = os.path.join(copydir, 'blobs', 'sha256', d_digest)
+        with open(dfile, 'r') as FFH:
+            ret = FFH.read()
+
+    return(ret)
+
+def analyze_image(userId, manifest, image_record, tmprootdir, localconfig, registry_creds=[], use_cache_dir=None, image_source='registry', image_source_meta=None, parent_manifest=None):
     # need all this
 
     imageId = None
@@ -818,19 +914,6 @@ def analyze_image(userId, manifest, image_record, tmprootdir, localconfig, regis
 
     try:
         imageDigest = image_record['imageDigest']
-        try:
-            manifest_data = json.loads(manifest)
-            manifest_schema_version = manifest_data['schemaVersion']
-            if manifest_schema_version == 1:
-                dest_type = 'dir'
-            else:
-                dest_type = 'oci'
-
-            #analyzer_manifest = {}
-            #analyzer_manifest.update(manifest_data)
-
-        except Exception as err:
-            raise Exception("cannot load manifest as JSON rawmanifest="+str(manifest)+") - exception: " + str(err))
 
         if image_record['dockerfile_mode']:
             dockerfile_mode = image_record['dockerfile_mode']
@@ -849,11 +932,29 @@ def analyze_image(userId, manifest, image_record, tmprootdir, localconfig, regis
         except Exception as err:
             raise err
 
-        try:
-            rc = pull_image(staging_dirs, pullstring, registry_creds=registry_creds, manifest=manifest, dest_type=dest_type)
-        except Exception as err:
-            raise ImagePullError(cause=err, pull_string=pullstring, tag=fulltag)
+        if image_source == 'docker-archive':
+            try:
+                rc = anchore_engine.clients.skopeo_wrapper.copy_image_from_docker_archive(image_source_meta, staging_dirs['copydir'])
+            except Exception as err:
+                raise ImagePullError(cause=err, pull_string=pullstring, tag=fulltag)
 
+            manifest = get_manifest_from_staging(staging_dirs)
+        try:
+            manifest_data = json.loads(manifest)
+            manifest_schema_version = manifest_data['schemaVersion']
+            if manifest_schema_version == 1:
+                dest_type = 'dir'
+            else:
+                dest_type = 'oci'
+        except Exception as err:
+            raise Exception("cannot load manifest as JSON rawmanifest="+str(manifest)+") - exception: " + str(err))
+
+        if image_source != 'docker-archive':
+            try:
+                rc = pull_image(staging_dirs, pullstring, registry_creds=registry_creds, manifest=manifest, parent_manifest=parent_manifest, dest_type=dest_type)
+            except Exception as err:
+                raise ImagePullError(cause=err, pull_string=pullstring, tag=fulltag)
+        
         try:
             if manifest_data['schemaVersion'] == 1:
                 docker_history, layers, dockerfile_contents, dockerfile_mode, imageArch = get_image_metadata_v1(staging_dirs, imageDigest, imageId, manifest_data, dockerfile_contents=dockerfile_contents, dockerfile_mode=dockerfile_mode)
@@ -868,17 +969,22 @@ def analyze_image(userId, manifest, image_record, tmprootdir, localconfig, regis
 
         familytree = layers
 
+        timer = time.time()
         try:
             imageSize = unpack(staging_dirs, layers)
         except Exception as err:
             raise ImageUnpackError(cause=err, pull_string=pullstring, tag=fulltag)
+        logger.debug("timing: total unpack time: {} - {}".format(pullstring, time.time() - timer))
 
         familytree = layers
 
+        timer = time.time()
         try:
             analyzer_report = run_anchore_analyzers(staging_dirs, imageDigest, imageId, localconfig)
         except Exception as err:
             raise AnalyzerError(cause=err, pull_string=pullstring, tag=fulltag)
+        logger.debug("timing: total analyzer time: {} - {}".format(pullstring, time.time() - timer))
+
 
         try:
             image_report = generate_image_export(staging_dirs, imageDigest, imageId, analyzer_report, imageSize, fulltag, docker_history, dockerfile_mode, dockerfile_contents, layers, familytree, imageArch, pullstring, analyzer_manifest)
@@ -898,7 +1004,7 @@ def analyze_image(userId, manifest, image_record, tmprootdir, localconfig, regis
     if not image_report:
         raise Exception("failed to analyze")
 
-    return(image_report)
+    return(image_report, manifest)
 
 
 class AnalysisError(AnchoreException):

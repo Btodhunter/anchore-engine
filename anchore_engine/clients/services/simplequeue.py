@@ -6,9 +6,19 @@ from anchore_engine.clients.services import http
 from anchore_engine.subsys import logger
 from anchore_engine.utils import get_threadbased_id
 from anchore_engine.clients.services.internal import InternalServiceClient
+from anchore_engine.clients.services import internal_client_for
 import retrying
 
+class LeaseUnavailableError(Exception):
+    """
+    A lease is held by another thread and was not freed within the timeout
+    """
+    pass
+
 class LeaseAcquisitionFailedError(Exception):
+    """
+    A lease could not be acquired due to errors, not simply it being held by another thread
+    """
     pass
 
 
@@ -56,7 +66,7 @@ class SimpleQueueClient(InternalServiceClient):
         return self.round_robin_call_api(http.anchy_put, 'leases/{lease_id}/ttl', path_params={'lease_id': lease_id}, query_params={'client_id': client_id, 'ttl': ttl, 'epoch': epoch})
 
 
-def run_target_with_queue_ttl(user_auth, queue, visibility_timeout, target, max_wait_seconds=0, autorefresh=True, retries=1, backoff_time=0, *args, **kwargs):
+def run_target_with_queue_ttl(account, queue, visibility_timeout, target, max_wait_seconds=0, autorefresh=True, retries=1, backoff_time=0, *args, **kwargs):
     """
     Run a target function with the message pulled from the queue. If autorefresh=True, then run target as a thread and periodically check
     for completion, updating the message visibility timeout to keep it fresh until the thread completes.
@@ -76,7 +86,9 @@ def run_target_with_queue_ttl(user_auth, queue, visibility_timeout, target, max_
     :return:
     """
 
-    client = SimpleQueueClient(as_account=user_auth[0], user=user_auth[0], password=user_auth[1])
+    #client = SimpleQueueClient(as_account=user_auth[0], user=user_auth[0], password=user_auth[1])
+    client = internal_client_for(SimpleQueueClient, account)
+
     ex = None
     qobj = None
 
@@ -134,7 +146,7 @@ def run_target_with_queue_ttl(user_auth, queue, visibility_timeout, target, max_
         # Always delete the message. Other handlers will ensure things are queued ok.
 
 
-def run_target_with_lease(user_auth, lease_id, target, ttl=60, client_id=None, autorefresh=True, *args, **kwargs):
+def run_target_with_lease(account, lease_id, target, ttl=60, client_id=None, autorefresh=True, *args, **kwargs):
     """
     Run a handler within the context of a lease that is auto-refreshed as long as the handler runs.
 
@@ -142,7 +154,7 @@ def run_target_with_lease(user_auth, lease_id, target, ttl=60, client_id=None, a
 
     The leases are fairly slow to actuate, so expect to use this mechanism for longer running tasks where the lease duration should be > 10 sec
 
-    :param user_auth:
+    :param account: account to use for the q client, may be None for system user
     :param lease_id:
     :param target:
     :param args:
@@ -151,7 +163,7 @@ def run_target_with_lease(user_auth, lease_id, target, ttl=60, client_id=None, a
     """
     handler_thread = threading.Thread(target=target, args=args, kwargs=kwargs)
 
-    client = SimpleQueueClient(as_account=user_auth[0], user=user_auth[0], password=user_auth[1])
+    client = internal_client_for(SimpleQueueClient, account)
 
     # Ensure task lease exists for acquisition and create if not found
     lease_resp = client.describe_lease(lease_id)
@@ -165,45 +177,49 @@ def run_target_with_lease(user_auth, lease_id, target, ttl=60, client_id=None, a
     lease = None
     try:
         my_id = get_threadbased_id() if client_id is None else client_id
-        lease = client.acquire_lease(lease_id, client_id=my_id, ttl=ttl)
+        try:
+            lease = client.acquire_lease(lease_id, client_id=my_id, ttl=ttl)
+            if not lease:
+                raise LeaseUnavailableError('Another owner holds lease {}, and did not release within timeout {}'.format(lease_id, ttl))
 
-        if not lease:
-            logger.debug('No lease returned from service, cannot proceed with task execution. Will retry on next cycle. Lease_id: {}'.format(lease_id))
-            raise LeaseAcquisitionFailedError('Could not acquire lease {} within timeout'.format(lease_id))
+        except Exception as e:
+            raise LeaseAcquisitionFailedError('Error during lease acquisition: {}'.format(e))
+
+        logger.debug('Got lease: {}'.format(lease))
+
+        t = time.time()
+        logger.debug('Starting target={} with lease={} and client_id={}'.format(target.__name__, lease_id, lease['held_by']))
+        handler_thread.start()
+
+        if autorefresh:
+            # Run the task thread and monitor it, refreshing the task lease as needed
+            while handler_thread.isAlive():
+                # If we're halfway to the timeout, refresh to have a safe buffer
+                if time.time() - t > (ttl / 2):
+                    # refresh the lease
+                    for i in range(3):
+                        try:
+                            resp = client.refresh_lease(lease_id=lease['id'], client_id=lease['held_by'], epoch=lease['epoch'], ttl=ttl)
+                            logger.debug('Lease {} refreshed with response: {}'.format(lease_id, resp))
+                            if resp:
+                                lease = resp
+                                t = time.time()
+                                break
+                        except Exception as e:
+                            logger.exception('Error updating lease {}'.format(lease['id']))
+                    else:
+                        logger.debug('Lease refresh failed to succeed after retries. Lease {} may be lost due to timeout'.format(lease_id))
+
+                handler_thread.join(timeout=1)
         else:
-            logger.debug('Got lease: {}'.format(lease))
+            handler_thread.join()
 
-            t = time.time()
-            logger.debug('Starting target={} with lease={} and client_id={}'.format(target.__name__, lease_id, lease['held_by']))
-            handler_thread.start()
-
-            if autorefresh:
-                # Run the task thread and monitor it, refreshing the task lease as needed
-                while handler_thread.isAlive():
-                    # If we're halfway to the timeout, refresh to have a safe buffer
-                    if time.time() - t > (ttl / 2):
-                        # refresh the lease
-                        for i in range(3):
-                            try:
-                                resp = client.refresh_lease(lease_id=lease['id'], client_id=lease['held_by'], epoch=lease['epoch'], ttl=ttl)
-                                logger.debug('Lease {} refreshed with response: {}'.format(lease_id, resp))
-                                if resp:
-                                    lease = resp
-                                    t = time.time()
-                                    break
-                            except Exception as e:
-                                logger.exception('Error updating lease {}'.format(lease['id']))
-                        else:
-                            logger.warn('Lease refresh failed to succeed after retries. Lease {} may be lost due to timeout'.format(lease_id))
-
-                    handler_thread.join(timeout=1)
-            else:
-                handler_thread.join()
-
-            logger.debug('Target thread returned')
-
+        logger.debug('Target thread returned')
+    except (LeaseAcquisitionFailedError, LeaseUnavailableError) as e:
+        logger.debug('Could not acquire lease, but this may be normal: {}'.format(e))
+        raise e
     except Exception as e:
-        logger.warn('Attempting to get lease {} failed: {}'.format(lease_id, e))
+        logger.debug('Attempting to get lease {} failed: {}'.format(lease_id, e))
         raise e
     finally:
         try:

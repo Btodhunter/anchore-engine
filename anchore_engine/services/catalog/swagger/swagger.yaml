@@ -2,7 +2,7 @@
 swagger: "2.0"
 info:
   description: "Catalog service for anchore-engine"
-  version: "0.9.1"
+  version: "0.9.2"
   title: "Catalog"
   contact:
     email: "dev@anchore.com"
@@ -20,13 +20,6 @@ tags:
 schemes:
 - "https"
 - "http"
-
-securityDefinitions:
-  basicAuth:
-    type: basic
-
-security:
-  - basicAuth: []
 
 paths:
   /status:
@@ -88,94 +81,6 @@ paths:
           schema:
             type: object
       x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.default_controller"
-  /query/images/by_vulnerability:
-    get:
-      x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.default_controller"
-      operationId: query_images_by_vulnerability_get
-      summary: "Return image info for specified vulnerability"
-      description: "Return image info for specified vulnerability"
-      produces:
-      - "application/json"
-      parameters:
-      - name: "vulnerability_id"
-        in: "query"
-        type: string
-        required: true
-      - name: "severity"
-        in: "query"
-        type: string
-        required: false
-      - name: "namespace"
-        in: "query"
-        type: string
-        required: false
-      - name: "affected_package"
-        in: "query"
-        type: string
-        required: false
-      - name: vendor_only
-        in: query
-        type: boolean
-        description: ""
-        required: false
-        default: true
-      responses:
-        200:
-          description: "Vulnerable image listing"
-          schema:
-            type: object
-  /query/images/by_package:
-    get:
-      x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.default_controller"
-      operationId: query_images_by_package_get
-      summary: "Return image info for specified package"
-      description: "Return image info for specified package"
-      produces:
-      - "application/json"
-      parameters:
-      - name: "name"
-        in: "query"
-        type: string
-        required: true
-      - name: "version"
-        in: "query"
-        type: string
-        required: false
-      - name: "package_type"
-        in: "query"
-        type: string
-        required: false
-      responses:
-        200:
-          description: "Matched image listing"
-          schema:
-            type: object
-  /query/vulnerabilities:
-    get:
-      x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.default_controller"
-      operationId: query_vulnerabilities_get
-      summary: "Return vulnerability information for specified vulnerability ID"
-      description: "Return vulnerability information for specified vulnerability ID" 
-      produces:
-      - "application/json"
-      parameters:
-      - name: "id"
-        in: "query"
-        type: string
-        required: true
-      - name: "affected_package"
-        in: "query"
-        type: string
-        required: false
-      - name: "affected_package_version"
-        in: "query"
-        type: string
-        required: false
-      responses:
-        200:
-          description: "Matched vulnerability record"
-          schema:
-            type: object
   /images:
     get:
       tags:
@@ -245,6 +150,11 @@ paths:
         in: query
         type: boolean
         description: If set, add the image from the image archive rather than running a new analysis. In this case, other params such as metadata and tag are ignored and only the digest is used.
+      - name: allow_dockerfile_update
+        in: query
+        type: boolean
+        description: Explicitly allow the update of a dockerfile for an image that has already been analyzed (similar to the 'force' option in the external api call, but scoped only to the dockerfile). Defaults to false.
+        required: false
       - name: image_metadata
         in: body
         schema:
@@ -358,28 +268,28 @@ paths:
             type: object
       x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.default_controller"
 
-  /import:
-    post:
-      tags:
-      - "catalog"
-      summary: "Import raw anchore image record into DB"
-      description: ""
-      operationId: "image_import"
-      parameters:
-      - name: 'bodycontent'
-        in: body
-        schema:
-          type: object
-        description: "image record to update"
-        required: true
-      produces:
-      - "application/json"
-      responses:
-        200:
-          description: "success"
-          schema:
-            type: object
-      x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.default_controller"
+#  /import:
+#    post:
+#      tags:
+#      - "catalog"
+#      summary: "Import raw anchore image record into DB"
+#      description: ""
+#      operationId: "image_import"
+#      parameters:
+#      - name: 'bodycontent'
+#        in: body
+#        schema:
+#          type: object
+#        description: "image record to update"
+#        required: true
+#      produces:
+#      - "application/json"
+#      responses:
+#        200:
+#          description: "success"
+#          schema:
+#            type: object
+#      x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.default_controller"
 
   /policies:
     get:
@@ -904,6 +814,12 @@ paths:
         type: string
         description: ""
         required: false
+      - name: event_type
+        in: query
+        type: string
+        description: Filter events by a prefix match on the event type (e.g. "user.image.")
+        required: false
+        pattern: '^[a-z0-9-_.*]+$'
       - name: resource_id
         in: query
         type: string
@@ -1149,6 +1065,7 @@ paths:
         type: string
         description: "registry Id object to get"
         required: true
+        format: path
       produces:
       - "application/json"
       responses:
@@ -1169,6 +1086,7 @@ paths:
         type: string
         description: "registry Id object to delete"
         required: true
+        format: path
       produces:
       - "application/json"
       responses:
@@ -1189,6 +1107,7 @@ paths:
         type: string
         description: "registry Id of object to update"
         required: true
+        format: path
       - name: 'validate'
         in: query
         type: boolean
@@ -1350,7 +1269,13 @@ paths:
     get:
       operationId: list_analysis_archive_rules
       x-swagger-router-controller: anchore_engine.services.catalog.api.controllers.archives
-      x-anchore-authz-action: listArchiveTransitions
+      x-anchore-authz-action: listArchiveTransitionRules
+      parameters:
+        - name: system_global
+          in: query
+          required: false
+          type: boolean
+          description: If true include system global rules (owned by admin) even for non-admin users. Defaults to true if not set. Can be set to false to exclude globals
       responses:
         200:
           description: Archive transition rules
@@ -1363,7 +1288,7 @@ paths:
     post:
       operationId: create_analysis_archive_rule
       x-swagger-router-controller: anchore_engine.services.catalog.api.controllers.archives
-      x-anchore-authz-action: createArchiveTransition
+      x-anchore-authz-action: createArchiveTransitionRule
       parameters:
         - name: rule
           in: body
@@ -1383,7 +1308,7 @@ paths:
     get:
       operationId: get_analysis_archive_rule
       x-swagger-router-controller: anchore_engine.services.catalog.api.controllers.archives
-      x-anchore-authz-action: getArchiveTransition
+      x-anchore-authz-action: getArchiveTransitionRule
       parameters:
         - name: rule_id
           type: string
@@ -1401,7 +1326,7 @@ paths:
     delete:
       operationId: delete_analysis_archive_rule
       x-swagger-router-controller: anchore_engine.services.catalog.api.controllers.archives
-      x-anchore-authz-action: deleteArchiveTransition
+      x-anchore-authz-action: deleteArchiveTransitionRule
       parameters:
         - name: rule_id
           type: string
@@ -1420,7 +1345,7 @@ paths:
     get:
       operationId: get_analysis_archive_rule_history
       x-swagger-router-controller: anchore_engine.services.catalog.api.controllers.archives
-      x-anchore-authz-action: getArchiveTransitionHistory
+      x-anchore-authz-action: getArchiveTransitionRuleHistory
       parameters:
         - name: rule_id
           type: string
@@ -1532,28 +1457,33 @@ paths:
 #        200:
 #          description: "success"
 #      x-swagger-router-controller: "anchore_engine.services.catalog.api.controllers.analysis_archive"
-#  /archives/images/data/{imageDigest}/import:
-#    post:
-#      summary: Import a previously exported archive tarball into the system.
-#      description: Load an archive into the system. If the imageDigest does not exist in the archive already, it is added. If the digest is already archived, an error is returned unless the 'force' parameter is set. If the digest exists in the catalog but is not archived, an error is returned regardless of 'force' status.
-#      operationId: import_archive
-#      x-swagger-router-controller: anchore_engine.services.catalog.api.controllers.analysis_archive
-#      consumes:
-#        - multipart/form-data
-#      produces:
-#        - application/json
-#      parameters:
-#        - name: archive_file
-#          in: formData
-#          description: The gzipped-tarball, .tar.gz, to be loaded
-#          type: file
-#          required: true
-#        responses:
-#          200:
-#            description: "Loaded"
-#            schema:
-#              # TODO: replace with proper model
-#              type: object
+  /archives/images/data/{imageDigest}/import:
+    post:
+      summary: Import a previously exported archive tarball into the system.
+      description: Load an archive into the system. If the imageDigest does not exist in the archive already, it is added. If the digest is already archived, an error is returned unless the 'force' parameter is set. If the digest exists in the catalog but is not archived, an error is returned regardless of 'force' status.
+      operationId: import_archive
+      x-swagger-router-controller: anchore_engine.services.catalog.api.controllers.archives
+      consumes:
+        - multipart/form-data
+      produces:
+        - application/json
+      parameters:
+        - name: archive_file
+          in: formData
+          description: The gzipped-tarball, .tar.gz, to be loaded
+          type: file
+          required: true
+        - name: 'imageDigest'
+          in: path
+          type: string
+          description: "imageDigest of image to import"
+          required: true
+      responses:
+        200:
+          description: "Loaded"
+          schema:
+            # TODO: replace with proper model
+            type: object
 definitions:
   ImageAddMetadata:
     description: Additional data to add to an image record when an image is ingressed, such as dockerfile and annotations

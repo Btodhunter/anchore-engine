@@ -36,14 +36,14 @@ system_user_auth = ('anchore-system', '')
 #current_avg_count = 0.0
 
 
-def perform_analyze(userId, manifest, image_record, registry_creds, layer_cache_enable=False):
+def perform_analyze(userId, manifest, image_record, registry_creds, layer_cache_enable=False, parent_manifest=None):
 
-    return perform_analyze_nodocker(userId, manifest, image_record, registry_creds, layer_cache_enable=layer_cache_enable)
+    return perform_analyze_nodocker(userId, manifest, image_record, registry_creds, layer_cache_enable=layer_cache_enable, parent_manifest=parent_manifest)
 
-def perform_analyze_nodocker(userId, manifest, image_record, registry_creds, layer_cache_enable=False):
+def perform_analyze_nodocker(userId, manifest, image_record, registry_creds, layer_cache_enable=False, parent_manifest=None):
     ret_analyze = {}
     ret_query = {}
-
+    
     localconfig = anchore_engine.configuration.localconfig.get_config()
     try:
         tmpdir = localconfig['tmp_dir']
@@ -59,6 +59,7 @@ def perform_analyze_nodocker(userId, manifest, image_record, registry_creds, lay
     try:
         image_detail = image_record['image_detail'][0]
         registry_manifest = manifest
+        registry_parent_manifest = parent_manifest
         pullstring = image_detail['registry'] + "/" + image_detail['repo'] + "@" + image_detail['imageDigest']
         fulltag = image_detail['registry'] + "/" + image_detail['repo'] + ":" + image_detail['tag']
         logger.debug("using pullstring ("+str(pullstring)+") and fulltag ("+str(fulltag)+") to pull image data")
@@ -67,13 +68,13 @@ def perform_analyze_nodocker(userId, manifest, image_record, registry_creds, lay
         raise Exception("failed to extract requisite information from image_record - exception: " + str(err))
         
     timer = int(time.time())
-    logger.spew("TIMING MARK0: " + str(int(time.time()) - timer))
+    logger.spew("timing: analyze start: " + str(int(time.time()) - timer))
     logger.info("performing analysis on image: " + str([userId, pullstring, fulltag]))
 
     logger.debug("obtaining anchorelock..." + str(pullstring))
     with anchore_engine.clients.localanchore_standalone.get_anchorelock(lockId=pullstring, driver='nodocker'):
         logger.debug("obtaining anchorelock successful: " + str(pullstring))
-        analyzed_image_report = localanchore_standalone.analyze_image(userId, registry_manifest, image_record, tmpdir, localconfig, registry_creds=registry_creds, use_cache_dir=use_cache_dir)
+        analyzed_image_report, manifest_raw = localanchore_standalone.analyze_image(userId, registry_manifest, image_record, tmpdir, localconfig, registry_creds=registry_creds, use_cache_dir=use_cache_dir, parent_manifest=registry_parent_manifest)
         ret_analyze = analyzed_image_report
 
     logger.info("performing analysis on image complete: " + str(pullstring))
@@ -85,7 +86,10 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
     global servicename #current_avg, current_avg_count
 
     timer = int(time.time())
-    event = None
+    analysis_events = []
+    #event = None
+    userId = None
+    imageDigest = None
     try:
         logger.debug('dequeued object: {}'.format(qobj))
 
@@ -93,6 +97,7 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
         userId = record['userId']
         imageDigest = record['imageDigest']
         manifest = record['manifest']
+        parent_manifest = record.get('parent_manifest', None)
 
         # check to make sure image is still in DB
         catalog_client = internal_client_for(CatalogClient, userId)
@@ -116,24 +121,13 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
             image_record['analysis_status'] = anchore_engine.subsys.taskstate.working_state('analyze')
             rc = catalog_client.update_image(imageDigest, image_record)
 
-            # disable the webhook call for image state transistion to 'analyzing'
-            #try:
-            #    for image_detail in image_record['image_detail']:
-            #        fulltag = image_detail['registry'] + "/" + image_detail['repo'] + ":" + image_detail['tag']
-            #        npayload = {
-            #            'last_eval': {'imageDigest': imageDigest, 'analysis_status': last_analysis_status},
-            #            'curr_eval': {'imageDigest': imageDigest, 'analysis_status': image_record['analysis_status']},
-            #        }
-            #        rc = anchore_engine.subsys.notifications.queue_notification(userId, fulltag, 'analysis_update', npayload)
-            #except Exception as err:
-            #    logger.warn("failed to enqueue notification on image analysis state update - exception: " + str(err))
-
             # actually do analysis
             registry_creds = catalog_client.get_registry()
             try:
-                image_data = perform_analyze(userId, manifest, image_record, registry_creds, layer_cache_enable=layer_cache_enable)
+                image_data = perform_analyze(userId, manifest, image_record, registry_creds, layer_cache_enable=layer_cache_enable, parent_manifest=parent_manifest)
             except AnchoreException as e:
-                event = events.AnalyzeImageFail(user_id=userId, image_digest=imageDigest, error=e.to_dict())
+                event = events.ImageAnalysisFailed(user_id=userId, image_digest=imageDigest, error=e.to_dict())
+                analysis_events.append(event)
                 raise
 
             imageId = None
@@ -142,22 +136,25 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
             except Exception as err:
                 logger.warn("could not get imageId after analysis or from image record - exception: " + str(err))
 
+            logger.info("adding image analysis data to catalog: userid={} imageId={} imageDigest={}".format(userId, imageId, imageDigest))
             try:
                 logger.debug("archiving analysis data")
                 rc = catalog_client.put_document('analysis_data', imageDigest, image_data)
             except Exception as e:
                 err = CatalogClientError(msg='Failed to upload analysis data to catalog', cause=e)
-                event = events.ArchiveAnalysisFail(user_id=userId, image_digest=imageDigest, error=err.to_dict())
-                raise err
+                event = events.SaveAnalysisFailed(user_id=userId, image_digest=imageDigest, error=err.to_dict())
+                analysis_events.append(event)
+                raise err            
 
             if rc:
                 try:
-                    logger.debug("extracting image content data")
+                    logger.debug("extracting image content data locally")
                     image_content_data = {}
                     for content_type in anchore_engine.common.image_content_types + anchore_engine.common.image_metadata_types:
                         try:
                             image_content_data[content_type] = anchore_engine.common.helpers.extract_analyzer_content(image_data, content_type, manifest=manifest)
-                        except:
+                        except Exception as err:
+                            logger.warn("ERR: {}".format(err))
                             image_content_data[content_type] = {}
 
                     if image_content_data:
@@ -169,14 +166,14 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
                         anchore_engine.common.helpers.update_image_record_with_analysis_data(image_record, image_data)
 
                     except Exception as err:
-                        raise err
+                        raise err                            
 
                 except Exception as err:
                     import traceback
                     traceback.print_exc()
                     logger.warn("could not store image content metadata to archive - exception: " + str(err))
 
-                logger.debug("adding image record to policy-engine service (" + str(userId) + " : " + str(imageId) + ")")
+                logger.info("adding image to policy engine: userid={} imageId={} imageDigest={}".format(userId, imageId, imageDigest))                
                 try:
                     if not imageId:
                         raise Exception("cannot add image to policy engine without an imageId")
@@ -187,20 +184,33 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
                     pe_client = internal_client_for(PolicyEngineClient, userId)
 
                     try:
-                        logger.debug("clearing any existing record in policy engine for image: " + str(imageId))
+                        logger.debug("clearing any existing image record in policy engine: {} / {} / {}".format(userId, imageId, imageDigest))
                         rc = pe_client.delete_image(user_id=userId, image_id=imageId)
                     except Exception as err:
                         logger.warn("exception on pre-delete - exception: " + str(err))
 
-                    logger.info('Loading image into policy engine: {} {}'.format(userId, imageId))
-                    image_analysis_fetch_url='catalog://'+str(userId)+'/analysis_data/'+str(imageDigest)
-                    logger.debug("policy engine request: " + image_analysis_fetch_url)
-                    resp = pe_client.ingress_image(userId, imageId, image_analysis_fetch_url)
-                    logger.debug("policy engine image add response: " + str(resp))
+                    client_success = False
+                    last_exception = None
+                    for retry_wait in [1, 3, 5, 0]:
+                        try:
+                            logger.debug('loading image into policy engine: {} / {} / {}'.format(userId, imageId, imageDigest))
+                            image_analysis_fetch_url='catalog://'+str(userId)+'/analysis_data/'+str(imageDigest)
+                            logger.debug("policy engine request: " + image_analysis_fetch_url)
+                            resp = pe_client.ingress_image(userId, imageId, image_analysis_fetch_url)
+                            logger.debug("policy engine image add response: " + str(resp))
+                            client_success = True
+                            break
+                        except Exception as e:
+                            logger.warn("attempt failed, will retry - exception: {}".format(e))                            
+                            last_exception = e
+                            time.sleep(retry_wait)
+                    if not client_success:
+                        raise last_exception                                                        
 
                 except Exception as err:
                     newerr = PolicyEngineClientError(msg='Adding image to policy-engine failed', cause=str(err))
-                    event = events.LoadAnalysisFail(user_id=userId, image_digest=imageDigest, error=newerr.to_dict())
+                    event = events.PolicyEngineLoadAnalysisFailed(user_id=userId, image_digest=imageDigest, error=newerr.to_dict())
+                    analysis_events.append(event)
                     raise newerr
 
                 logger.debug("updating image catalog record analysis_status")
@@ -229,13 +239,21 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
                         if annotations:
                             npayload['annotations'] = annotations
 
-                        rc = anchore_engine.subsys.notifications.queue_notification(userId, fulltag, 'analysis_update', npayload)
+                        #original method
+                        #rc = anchore_engine.subsys.notifications.queue_notification(userId, fulltag, 'analysis_update', npayload)
+
+                        # new method
+                        npayload['subscription_type'] = 'analysis_update'
+                        event = events.UserAnalyzeImageCompleted(user_id=userId, full_tag=fulltag, data=npayload)
+                        analysis_events.append(event)
+                            
                 except Exception as err:
                     logger.warn("failed to enqueue notification on image analysis state update - exception: " + str(err))
 
             else:
                 err = CatalogClientError(msg='Failed to upload analysis data to catalog', cause='Invalid response from catalog API - {}'.format(str(rc)))
-                event = events.ArchiveAnalysisFail(user_id=userId, image_digest=imageDigest, error=err.to_dict())
+                event = events.SaveAnalysisFailed(user_id=userId, image_digest=imageDigest, error=err.to_dict())
+                analysis_events.append(event)
                 raise err
 
             logger.info("analysis complete: " + str(userId) + " : " + str(imageDigest))
@@ -244,16 +262,8 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
 
             try:
                 run_time = float(time.time() - timer)
-                #current_avg_count = current_avg_count + 1.0
-                #new_avg = current_avg + ((run_time - current_avg) / current_avg_count)
-                #current_avg = new_avg
 
                 anchore_engine.subsys.metrics.histogram_observe('anchore_analysis_time_seconds', run_time, buckets=[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0, 3600.0], status="success")
-                #anchore_engine.subsys.metrics.counter_inc('anchore_images_analyzed_total')
-
-                #localconfig = anchore_engine.configuration.localconfig.get_config()
-                #service_record = {'hostid': localconfig['host_id'], 'servicename': servicename}
-                #anchore_engine.subsys.servicestatus.set_status(service_record, up=True, available=True, detail={'avg_analysis_time_sec': current_avg, 'total_analysis_count': current_avg_count}, update_db=True)
 
             except Exception as err:
                 logger.warn(str(err))
@@ -266,12 +276,19 @@ def process_analyzer_job(system_user_auth, qobj, layer_cache_enable):
             image_record['analysis_status'] = anchore_engine.subsys.taskstate.fault_state('analyze')
             image_record['image_status'] = anchore_engine.subsys.taskstate.fault_state('image_status')
             rc = catalog_client.update_image(imageDigest, image_record)
+
+            if userId and imageDigest:
+                for image_detail in image_record['image_detail']:
+                    fulltag = image_detail['registry'] + "/" + image_detail['repo'] + ":" + image_detail['tag']                
+                    event = events.UserAnalyzeImageFailed(user_id=userId, full_tag=fulltag, error=str(err))
+                    analysis_events.append(event)
         finally:
-            if event:
-                try:
-                    catalog_client.add_event(event)
-                except:
-                    logger.error('Ignoring error creating analysis failure event')
+            if analysis_events:
+                for event in analysis_events:
+                    try:
+                        catalog_client.add_event(event)
+                    except:
+                        logger.error('Ignoring error sending event')
 
 
     except Exception as err:

@@ -4,13 +4,15 @@ import pkg_resources
 import os
 import retrying
 
+from sqlalchemy.exc import IntegrityError
+
 # anchore modules
 import anchore_engine.clients.services.common
 import anchore_engine.subsys.servicestatus
 import anchore_engine.subsys.metrics
 from anchore_engine.subsys import logger
 from anchore_engine.configuration import localconfig
-from anchore_engine.clients.services import simplequeue
+from anchore_engine.clients.services import simplequeue, internal_client_for
 from anchore_engine.clients.services.simplequeue import SimpleQueueClient
 from anchore_engine.service import ApiService, LifeCycleStages
 
@@ -52,7 +54,7 @@ except:
 # service funcs (must be here)
 
 def _check_feed_client_credentials():
-    from anchore_engine.clients.feeds.feed_service import get_client
+    from anchore_engine.services.policy_engine.engine.feeds.client import get_client
     sleep_time = feed_config_check_backoff
     last_ex = None
 
@@ -126,6 +128,7 @@ def _init_distro_mappings():
     # set up any data necessary at system init
     try:
         logger.info('Checking policy engine db initialization. Checking initial set of distro mappings')
+
         with session_scope() as dbsession:
             distro_mappings = dbsession.query(DistroMapping).all()
 
@@ -136,7 +139,11 @@ def _init_distro_mappings():
 
         logger.info('Distro mapping initialization complete')
     except Exception as err:
-        raise Exception("unable to initialize default distro mappings - exception: " + str(err))
+
+        if isinstance(err, IntegrityError):
+            logger.warn("another process has already initialized, continuing")
+        else:
+            raise Exception("unable to initialize default distro mappings - exception: " + str(err))
 
     return True
 
@@ -155,7 +162,7 @@ def do_feed_sync(msg):
         from anchore_engine.services.policy_engine.engine.tasks import FeedsUpdateTask
 
     if 'get_selected_feeds_to_sync' not in locals():
-        from anchore_engine.services.policy_engine.engine.feeds import get_selected_feeds_to_sync
+        from anchore_engine.services.policy_engine.engine.feeds.sync import get_selected_feeds_to_sync
 
     handler_success = False
     timer = time.time()
@@ -221,7 +228,7 @@ def run_feed_sync(system_user):
     else:
         try:
             # This has its own retry on the queue fetch, so wrap with catch block to ensure we don't double-retry on task exec
-            simplequeue.run_target_with_queue_ttl(system_user, queue=feed_sync_queuename, target=do_feed_sync,
+            simplequeue.run_target_with_queue_ttl(None, queue=feed_sync_queuename, target=do_feed_sync,
                                                   max_wait_seconds=30, visibility_timeout=180, retries=FEED_SYNC_RETRIES,
                                                   backoff_time=FEED_SYNC_RETRY_BACKOFF)
         except Exception as err:
@@ -270,7 +277,8 @@ def push_sync_task(system_user):
         logger.info("simplequeue service not yet ready, will retry")
         raise Exception("Simplequeue service not yet ready")
     else:
-        q_client = SimpleQueueClient(user=system_user[0], password=system_user[1])
+        #q_client = SimpleQueueClient(user=system_user[0], password=system_user[1])
+        q_client = internal_client_for(SimpleQueueClient, userId=None)
         if not q_client.is_inqueue(name=feed_sync_queuename, inobj=feed_sync_msg):
             try:
                 q_client.enqueue(name=feed_sync_queuename, inobj=feed_sync_msg)

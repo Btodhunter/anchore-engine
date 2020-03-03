@@ -18,7 +18,7 @@ imgid = config['imgid_full']
 outputdir = config['dirs']['outputdir']
 unpackdir = config['dirs']['unpackdir']
 
-meta = anchore_engine.analyzers.utils.get_distro_from_squashtar(os.path.join(unpackdir, "squashed.tar"))
+meta = anchore_engine.analyzers.utils.get_distro_from_squashtar(os.path.join(unpackdir, "squashed.tar"), unpackdir=unpackdir)
 distrodict = anchore_engine.analyzers.utils.get_distro_flavor(meta['DISTRO'], meta['DISTROVERS'], likedistro=meta['LIKEDISTRO'])
 
 print("analyzer starting up: imageId="+str(imgid) + " meta="+str(meta) + " distrodict="+str(distrodict))
@@ -51,7 +51,6 @@ if distrodict['flavor'] == "RHEL":
 
 elif distrodict['flavor'] == "DEB":
     try:
-        #(all_packages, actual_packages, other_packages, dpkgdbdir) = anchore_engine.analyzers.utils.dpkg_get_all_packages_from_squashtar(unpackdir, os.path.join(unpackdir, "squashed.tar"))
         (all_packages, all_packages_simple, actual_packages, other_packages, dpkgdbdir) = anchore_engine.analyzers.utils.dpkg_get_all_packages_detail_from_squashtar(unpackdir, os.path.join(unpackdir, "squashed.tar"))
     
         for p in list(actual_packages.keys()):
@@ -73,7 +72,7 @@ elif distrodict['flavor'] == "DEB":
         print("WARN: failed to get package list from DPKG: " + str(err))
 
     try:
-        dpkgfiles = anchore_engine.analyzers.utils.dpkg_get_all_pkgfiles(dpkgdbdir)
+        dpkgfiles = anchore_engine.analyzers.utils.dpkg_get_all_pkgfiles_from_squashtar(dpkgdbdir, os.path.join(unpackdir, "squashed.tar"))
         for pkgfile in list(dpkgfiles.keys()):
             pkgfilesall[pkgfile] = "DPKGFILE"
 

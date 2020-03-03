@@ -1,7 +1,7 @@
 """
 Common functions and variables for all entity types including some bootstrap and init functions
 """
-
+import decimal
 import json
 import uuid
 import time
@@ -330,13 +330,13 @@ def end_session():
         ThreadLocalSession.remove()
 
 
-def init_thread_session():
+def init_thread_session(force_new=False):
     """
     Configure a scoped session factory which is a thread-local session cache
     :return:
     """
     global ThreadLocalSession, engine
-    if not ThreadLocalSession:
+    if force_new or not ThreadLocalSession:
         ThreadLocalSession = scoped_session(sessionmaker(bind=engine))
 
 

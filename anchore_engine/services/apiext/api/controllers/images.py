@@ -3,6 +3,8 @@ import stat
 import datetime
 import base64
 import re
+import tarfile
+import io
 from connexion import request
 
 from anchore_engine import utils
@@ -19,6 +21,8 @@ import anchore_engine.common.images
 import anchore_engine.configuration.localconfig
 from anchore_engine.subsys import taskstate, logger
 import anchore_engine.subsys.metrics
+from anchore_engine.utils import parse_dockerimage_string
+from anchore_engine.services.apiext.api.controllers.utils import normalize_image_add_source, validate_image_add_source
 
 from anchore_engine.subsys.metrics import flask_metrics
 
@@ -50,6 +54,14 @@ def make_response_content(content_type, content_data):
                         el[k] = content_data[package][k]
                     else:
                         el[k] = None
+
+                # Special formatting for rpms
+                if content_data[package].get('type', "").lower() in ['rpm']:
+                    v = content_data[package].get('version', None)
+                    r = content_data[package].get('release', None)
+                    if (v and r) and (v.lower() != 'n/a') and r.lower() != 'n/a':
+                        el['version'] = "{}-{}".format(v, r)
+                        
             except:
                 el = {}
             if el:
@@ -137,7 +149,6 @@ def make_response_content(content_type, content_data):
                         el[elmap[elkey]] = None
 
                 # special formatting
-                #el['mode'] = oct(stat.S_IMODE(el['mode']))
                 el['mode'] = format(stat.S_IMODE(el['mode']), '05o')
                 if el['sha256'] == 'DIRECTORY_OR_OTHER':
                     el['sha256'] = None
@@ -163,6 +174,75 @@ def make_response_content(content_type, content_data):
 
     return(ret)
 
+def make_cvss_scores(metrics):
+    """
+     [
+        {
+          "cvss_v2": {
+            "base_metrics": {
+              ...
+            },
+            "vector_string": "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+            "version": "2.0"
+          },
+          "cvss_v3": {
+            "base_metrics": {
+             ...
+            },
+            "vector_string": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "version": "3.0"
+          },
+          "id": "CVE-2019-1234"
+        },
+        {
+          "cvss_v2": {
+            "base_metrics": {
+              ...
+            },
+            "vector_string": "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+            "version": "2.0"
+          },
+          "cvss_v3": {
+            "base_metrics": {
+             ...
+            },
+            "vector_string": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "version": "3.0"
+          },
+          "id": "CVE-2019-3134"
+        },
+     ]
+    :param metrics:
+    :return:
+    """
+    score_list = []
+
+    for metric in metrics:
+        new_score_packet = {
+            'id': metric.get('id'),
+        }
+        score_list.append(new_score_packet)
+
+        for i in [3, 2]:
+            cvss_dict = metric.get('cvss_v{}'.format(i), {})
+            base_metrics = cvss_dict.get('base_metrics', {}) if cvss_dict else {}
+
+            tmp = base_metrics.get('base_score', -1.0)
+            base_score = float(tmp) if tmp else -1.0
+            tmp = base_metrics.get('exploitability_score', -1.0)
+            exploitability_score = float(tmp) if tmp else -1.0
+            tmp = base_metrics.get('impact_score', -1.0)
+            impact_score = float(tmp) if tmp else -1.0
+
+            new_score_packet['cvss_v{}'.format(i)] = {
+                'base_score': base_score,
+                'exploitability_score': exploitability_score,
+                'impact_score': impact_score
+            }
+
+    return score_list
+
+
 def make_response_vulnerability(vulnerability_type, vulnerability_data):
     ret = []
 
@@ -180,9 +260,12 @@ def make_response_vulnerability(vulnerability_type, vulnerability_data):
         'package_version': 'None',
         'package_type': 'None',
         'package_cpe': 'None',
+        'package_cpe23': 'None',
         'package_path': 'None',
         'feed': 'None',
         'feed_group': 'None',
+        'nvd_data': 'None',
+        'vendor_data': 'None'
     }
 
     osvulns = []
@@ -225,12 +308,19 @@ def make_response_vulnerability(vulnerability_type, vulnerability_data):
                 else:
                     nonosvulns.append(el)
 
+                el['nvd_data'] = []
+                el['vendor_data'] = []
                 if row[header.index('CVES')]:
-                    #id_cves_map[el.get('vuln')] = row[header.index('CVES')].split()
-                    for cve in row[header.index('CVES')].split():
-                        id_cves_map[cve] = el.get('vuln')
+                    all_data = json.loads(row[header.index('CVES')])  # {'nvd_data': [], 'vendor_data': []}
+                    el['nvd_data'] = make_cvss_scores(all_data.get('nvd_data', []))
+                    el['vendor_data'] = make_cvss_scores(all_data.get('vendor_data', []))
+                    for nvd_el in el['nvd_data']:
+                        id_cves_map[nvd_el.get('id')] = el.get('vuln')
+                    #for cve in row[header.index('CVES')].split():
+                    #    id_cves_map[cve] = el.get('vuln')
 
     except Exception as err:
+        logger.exception('could not prepare query response')
         logger.warn("could not prepare query response - exception: " + str(err))
         ret = []
 
@@ -243,12 +333,14 @@ def make_response_vulnerability(vulnerability_type, vulnerability_data):
         'package_path': 'pkg_path',
         'package_type': 'pkg_type',
         'package_cpe': 'cpe',
+        'package_cpe23': 'cpe23',
         'url': 'link',
         'feed': 'feed_name',
         'feed_group': 'feed_namespace',
     }
     scan_result = vulnerability_data['cpe_report']
     for vuln in scan_result:
+
         el = {}
         el.update(eltemplate)
 
@@ -256,6 +348,25 @@ def make_response_vulnerability(vulnerability_type, vulnerability_data):
             el[k] = vuln[keymap[k]]
 
         el['package'] = "{}-{}".format(vuln['name'], vuln['version'])
+
+        # get nvd scores
+        el['nvd_data'] = []
+        el['nvd_data'] = make_cvss_scores(vuln.get('nvd_data', []))
+
+        # get vendor scores
+        el['vendor_data'] = []
+        el['vendor_data'] = make_cvss_scores(vuln.get('vendor_data', []))
+
+        fixed_in = vuln.get('fixed_in', [])
+        el['fix'] = ', '.join(fixed_in) if fixed_in else 'None'
+
+        # dedup logic for filtering nvd cpes that are referred by vulndb
+        if vuln.get('feed_name') == 'vulndb':
+            for nvd_item in vuln.get('nvd_data', []):
+                try:
+                    id_cves_map[nvd_item.get('id')] = el.get('vuln')
+                except Exception as err:
+                    logger.warn('failure during vulnerability dedup check (vulndbs over nvd) with {}'.format(err))
 
         nonosvulns.append(el)
 
@@ -486,6 +597,7 @@ def get_content(request_inputs, content_type, doformat=False):
         tag = params.pop('tag', None)
         imageDigest = params.pop('imageDigest', None)
         digest = params.pop('digest', None)
+        logger.debug('Request inputs: {}'.format(request_inputs))
         client = internal_client_for(CatalogClient, request_inputs['userId'])
         image_report = client.get_image(imageDigest)
 
@@ -618,62 +730,125 @@ def list_imagetags():
 
 
 @authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
+def import_image_archive(archive_file):
+
+    httpcode = 500
+    try:
+        request_inputs = anchore_engine.apis.do_request_prep(request, default_params={})
+        request_account = request_inputs['userId']
+
+        # TODO perform the archive format validation here, for now just a READ
+        try:
+            archive_buffer = archive_file.read()
+        except Exception as err:
+            httpcode = 409
+            raise Exception("invalid archive format (must be an image archive tar.gz generated by anchore) - exception: {}".format(err))
+
+        # get some information out of the archive for input validation
+        archive_account = None
+        archive_digest = None
+        with tarfile.open(fileobj=io.BytesIO(archive_buffer), format=tarfile.PAX_FORMAT) as TFH:
+            try:
+                with TFH.extractfile("archive_manifest") as AMFH:
+                    archive_manifest = json.loads(utils.ensure_str(AMFH.read()))
+                    archive_account = archive_manifest['account']
+                    archive_digest = archive_manifest['image_digest']
+            except Exception as err:
+                httpcode = 409
+                raise Exception ("cannot extract/parse archive_manifest from archive file - exception: {}".format(err))
+
+        # removed the bloe validation check as the checks are now performed in the archiving subsystem, based on the authenticated account
+        # perform verification that the account set in the archive matches the calling account namespace
+        # if (not request_account or not archive_account) or (request_account != archive_account):
+        #     httpcode = 409
+        #     raise Exception ("account in import archive ({}) does not match API request account ({})".format(archive_account, request_account))
+
+        # make the import call to the catalog
+        client = internal_client_for(CatalogClient, request_inputs['userId'])
+        catalog_import_return_object = client.import_archive(archive_digest, io.BytesIO(archive_buffer))
+
+        # finally grab the image record from the catalog, prep the respose and return
+        image_record = client.get_image(archive_digest)
+        return_object = [make_response_image(image_record, include_detail=True)]
+        httpcode = 200
+
+    except api_exceptions.AnchoreApiError as err:
+        return_object = make_response_error(err, in_httpcode=err.__response_code__)
+        httpcode = err.__response_code__
+    except Exception as err:
+        logger.debug("operation exception: " + str(err))
+        return_object = make_response_error(err, in_httpcode=httpcode)
+        httpcode = return_object['httpcode']
+
+    return return_object, httpcode
+
+@authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
 def list_images(history=None, image_to_get=None, fulltag=None, detail=False):
 
+    httpcode = 500
     try:
-        #request_inputs = anchore_engine.apis.do_request_prep(request, default_params={'history': False})
-        #return_object, httpcode = images(request_inputs)
-        return_object = do_list_images(ApiRequestContextProxy.namespace(), fulltag, history)
+        if image_to_get and not fulltag:
+            fulltag = image_to_get.get('tag')
+            digest = image_to_get.get('digest')
+        else:
+            digest = None
+
+        return_object = do_list_images(account=ApiRequestContextProxy.namespace(), filter_digest=digest, filter_tag=fulltag, history=history)
         httpcode = 200
     except api_exceptions.AnchoreApiError as err:
         return_object = make_response_error(err, in_httpcode=err.__response_code__)
         httpcode = err.__response_code__
     except Exception as err:
-        httpcode = 500
-        return_object = str(err)
+        logger.debug("operation exception: " + str(err))
+        return_object = make_response_error(err, in_httpcode=httpcode)
+        httpcode = return_object['httpcode']
 
     return return_object, httpcode
+
+
+def validate_pullstring_is_tag(pullstring):
+    try:
+        parsed = parse_dockerimage_string(pullstring)
+        return parsed.get('tag') is not None
+    except Exception as e:
+        logger.debug_exception('Error parsing pullstring {}. Err = {}'.format(pullstring, e))
+        raise ValueError('Error parsing pullstring {}'.format(pullstring))
+
+
+def validate_pullstring_is_digest(pullstring):
+    try:
+        parsed = parse_dockerimage_string(pullstring)
+        return parsed.get('digest') is not None
+    except Exception as e:
+        logger.debug_exception('Error parsing pullstring {}. Err = {}'.format(pullstring, e))
+        raise ValueError('Error parsing pullstring {}'.format(pullstring))
+
+
+digest_regex = re.compile('sha256:[a-fA-F0-9]{64}')
+
+
+def validate_archive_digest(digest: str):
+    return digest is not None and digest_regex.match(digest.strip())
 
 
 @authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
 def add_image(image, force=False, autosubscribe=False):
 
+
+    # TODO: use for validation pass
+    spec = ApiRequestContextProxy.get_service().api_spec
+
+    httpcode = 500
     try:
         request_inputs = anchore_engine.apis.do_request_prep(request, default_params={'force': force})
-        #return_object, httpcode = images(request_inputs)
 
-        source = {}
-        if not image.get('source'):
-            # use legacy fields and normalize to a source
-            if image.get('digest'):
-                source['digest'] = {
-                    'pullstring': image.get('digest'),
-                    'tag': image.get('tag'),
-                    'creation_timestamp_override': image.get('created_at'),
-                    'dockerfile': image.get('dockerfile')
-                }
-
-            elif image.get('tag'):
-                source['tag'] = {
-                    'pullstring': image.get('tag'),
-                    'dockerfile': image.get('dockerfile')
-                }
-            else:
-                return make_response_error('Request must include "tag", or "source" properties set in body', in_httpcode=400), 400
-        else:
-            source = image.get('source')
-
-        # Ensure only one source is set
-        if sum([1 if source.get('tag') else 0, 1 if source.get('digest') else 0,
-                1 if source.get('archive') else 0]) > 1:
-            return make_response_error('Source must have only one of ["tag", "digest", "archive"] set to a non-null value', in_httpcode=400), 400
-
-        # Validate source formats
-        # if source.get('digest'):
-            # if not digest_re.match(source['digest'].get('pullstring')):
-            #     raise Exception('Invalid pullstring for digest. Must match regex: {}'.format(digest_re))
-            # if not tag_re.match(source['digest'].get('tag')):
-            #     raise Exception('Invalid tag string. Must match regex: {}'.format(tag_re))
+        try:
+            normalized = normalize_image_add_source(analysis_request_dict=image)
+            validate_image_add_source(normalized, spec)
+        except api_exceptions.AnchoreApiError:
+            raise
+        except Exception as e:
+            raise api_exceptions.BadRequest('Could not validate request due to error', detail={'validation_error': str(e)})
 
         enable_subscriptions = [
             'analysis_update'
@@ -682,14 +857,21 @@ def add_image(image, force=False, autosubscribe=False):
         if autosubscribe:
             enable_subscriptions.append('tag_update')
 
+        source = normalized['source']
+
         return_object = analyze_image(ApiRequestContextProxy.namespace(), source, force, enable_subscriptions, image.get('annotations'))
         httpcode = 200
     except api_exceptions.AnchoreApiError as err:
-        httpcode = err.__response_code__
-        return_object = make_response_error(str(err), in_httpcode=httpcode)
+        raise err
+        # httpcode = err.__response_code__
+        # return_object = make_response_error(err.message, details=err.detail, in_httpcode=httpcode)
+    except ValueError as err:
+        httpcode = 400
+        return_object = make_response_error(str(err), in_httpcode=400)
     except Exception as err:
-        httpcode = 500
-        return_object = str(err)
+        logger.debug("operation exception: {}".format(str(err)))
+        return_object = make_response_error(err, in_httpcode=httpcode)
+        httpcode = return_object['httpcode']
 
     return return_object, httpcode
 
@@ -966,45 +1148,45 @@ def get_image_vulnerabilities_by_type_imageId(imageId, vtype):
 
     return return_object, httpcode
 
-@flask_metrics.do_not_track()
-@authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
-def import_image(analysis_report):
-    try:
-        request_inputs = anchore_engine.apis.do_request_prep(request, default_params={})
-        return_object, httpcode = do_import_image(request_inputs, analysis_report)
+#@flask_metrics.do_not_track()
+#@authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
+#def import_image(analysis_report):
+#    try:
+#        request_inputs = anchore_engine.apis.do_request_prep(request, default_params={})
+#        return_object, httpcode = do_import_image(request_inputs, analysis_report)
+#
+#    except Exception as err:
+#        httpcode = 500
+#        return_object = str(err)
+#
+#    return return_object, httpcode
 
-    except Exception as err:
-        httpcode = 500
-        return_object = str(err)
 
-    return return_object, httpcode
-
-
-def do_import_image(request_inputs, importRequest):
-    user_auth = request_inputs['auth']
-    method = request_inputs['method']
-    bodycontent = request_inputs['bodycontent']
-    params = request_inputs['params']
-
-    return_object = {}
-    httpcode = 500
-
-    userId, pw = user_auth
-
-    try:
-        client = internal_client_for(CatalogClient, request_inputs['userId'])
-        return_object = []
-        image_records = client.import_image(json.loads(bodycontent))
-        for image_record in image_records:
-            return_object.append(make_response_image(image_record))
-        httpcode = 200
-
-    except Exception as err:
-        logger.debug("operation exception: " + str(err))
-        return_object = make_response_error(err, in_httpcode=httpcode)
-        httpcode = return_object['httpcode']
-
-    return(return_object, httpcode)
+#def do_import_image(request_inputs, importRequest):
+#    user_auth = request_inputs['auth']
+#    method = request_inputs['method']
+#    bodycontent = request_inputs['bodycontent']
+#    params = request_inputs['params']
+#
+#    return_object = {}
+#    httpcode = 500
+#
+#    userId, pw = user_auth
+#
+#    try:
+#        client = internal_client_for(CatalogClient, request_inputs['userId'])
+#        return_object = []
+#        image_records = client.import_image(json.loads(bodycontent))
+#        for image_record in image_records:
+#            return_object.append(make_response_image(image_record))
+#        httpcode = 200
+#
+#    except Exception as err:
+#        logger.debug("operation exception: " + str(err))
+#        return_object = make_response_error(err, in_httpcode=httpcode)
+#        httpcode = return_object['httpcode']
+#
+#    return(return_object, httpcode)
 
 
 def do_list_images(account, filter_tag=None, filter_digest=None, history=False):
@@ -1023,12 +1205,28 @@ def do_list_images(account, filter_tag=None, filter_digest=None, history=False):
 
 def analyze_image(account, source, force=False, enable_subscriptions=None, annotations=None):
     """
+    Analyze an image from a source where a source can be one of:
 
-    :param account:
-    :param source:
-    :param force:
-    :param autosubscribe:
-    :param dockerfile: String dockerfile content. Optional.
+    'digest': {
+      'pullstring': str, (digest or tag, e.g docker.io/alpine@sha256:abc),
+      'tag': str, the tag itself to associate (e.g. docker.io/alpine:latest),
+      'creation_timestamp_override: str, rfc3339 format. necessary only if not doing a force re-analysis of existing image,
+      'dockerfile': str, the base64 encoded dockerfile content to associate with this tag at analysis time. optional
+    }
+
+    'tag': {
+      'pullstring': str, the full tag-style pull string for docker (e.g. docker.io/nginx:latest),
+      'dockerfile': str optional base-64 encoded dockerfile content to associate with this tag at analysis time. optional
+    }
+
+    'archive': {
+      'digest': str, the digest to restore from the analysis archive
+    }
+
+    :param account: str account id
+    :param source: dict source object with keys: 'tag', 'digest', and 'archive', with associated config for pulling source from each. See the api spec for schema details
+    :param force: bool, if true re-analyze existing image
+    :param enable_subscriptions: the list of subscriptions to enable at add time. Optional
     :param annotations: Dict of k/v annotations. Optional.
     :return: resulting image record
     """
@@ -1041,45 +1239,56 @@ def analyze_image(account, source, force=False, enable_subscriptions=None, annot
     digest = None
     ts = None
     is_from_archive = False
+    dockerfile = None
+    image_check = None
     try:
         logger.debug("handling POST: source={}, force={}, enable_subscriptions={}, annotations={}".format(source, force, enable_subscriptions, annotations))
 
         # if not, add it and set it up to be analyzed
         if source.get('archive'):
+            img_source = source.get('archive')
             # Do archive-based add
-            digest = source['archive']['digest']
+            digest = img_source['digest']
             is_from_archive = True
         elif source.get('tag'):
             # Do tag-based add
-            tag = source['tag']['pullstring']
+            img_source= source.get('tag')
+            tag = img_source['pullstring']
+            dockerfile = img_source.get('dockerfile')
 
         elif source.get('digest'):
             # Do digest-based add
-            tag = source['digest']['tag']
-            digest = source['digest']['pullstring']
+            img_source = source.get('digest')
 
-            ts = source.get('creation_timestamp_override')
+            tag = img_source['tag']
+            digest_info = anchore_engine.utils.parse_dockerimage_string(img_source['pullstring'])
+            digest = digest_info['digest']
+            dockerfile = img_source.get('dockerfile')
+
+            ts = img_source.get('creation_timestamp_override')
             if ts:
                 try:
-                    created_at_override = utils.rfc3339str_to_epoch(ts)
+                    ts = utils.rfc3339str_to_epoch(ts)
                 except Exception as err:
                     raise api_exceptions.InvalidDateFormat('source.creation_timestamp_override', ts)
 
             if force:
                 # Grab the trailing digest sha section and ensure it exists
                 try:
-                    digest_ref = digest.rsplit('@')[1]
-                    image_check = client.get_image(digest_ref)
+                    image_check = client.get_image(digest)
+                    if not image_check:
+                        raise Exception('No image found for digest {}'.format(digest))
                 except Exception as err:
-                    raise Exception("image digest must already exist to force re-analyze using tag+digest")
+                    raise ValueError("image digest must already exist to force re-analyze using tag+digest")
             elif not ts:
-                raise Exception("must supply creation_timestamp_override when adding a new image by tag+digest")
+                # If a new analysis of an image by digest + tag, we need a timestamp to insert into the tag history properly
+                raise ValueError("must supply creation_timestamp_override when adding a new image by tag+digest")
         else:
             raise ValueError("The source property must have at least one of tag, digest, or archive set to non-null")
 
         # add the image to the catalog
-        image_record = client.add_image(tag=tag, digest=digest, dockerfile=source.get('dockerfile'), annotations=annotations,
-                                        created_at=ts, from_archive=is_from_archive)
+        image_record = client.add_image(tag=tag, digest=digest, dockerfile=dockerfile, annotations=annotations,
+                                        created_at=ts, from_archive=is_from_archive, allow_dockerfile_update=force)
 
         imageDigest = image_record['imageDigest']
 
@@ -1118,6 +1327,9 @@ def analyze_image(account, source, force=False, enable_subscriptions=None, annot
                                 client.update_subscription({'subscription_type': sub_type, 'subscription_key': fulltag})
                             except:
                                 pass
+                    else:
+                        if enable_subscriptions and sub_type in enable_subscriptions:
+                            client.update_subscription({'active': True, 'subscription_type': sub_type, 'subscription_key': fulltag})
 
             # set the state of the image appropriately
             currstate = image_record['analysis_status']
@@ -1309,3 +1521,91 @@ def images_imageDigest_check(request_inputs, imageDigest):
 
     return (return_object, httpcode)
 
+
+
+def _get_image_ok(account, imageDigest):
+    """
+    Get the image id if the image exists and is analyzed, else raise error
+
+    :param account: 
+    :param imageDigest: 
+    :return: 
+    """
+    catalog_client = internal_client_for(CatalogClient, account)
+    image_report = catalog_client.get_image(imageDigest)
+
+    if image_report and image_report['analysis_status'] != taskstate.complete_state('analyze'):
+        raise api_exceptions.ResourceNotFound('artifacts', detail={"details": "image is not analyzed - analysis_status: " + image_report['analysis_status']})
+    elif not image_report:
+        raise api_exceptions.ResourceNotFound(imageDigest, detail={})
+
+    image_detail = image_report['image_detail'][0]
+    imageId = image_detail['imageId']
+
+    return imageId
+
+    
+@authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
+def list_retrieved_files(imageDigest):
+    """
+    GET /images/{imageDigest}/artifacts/retrieved_files
+    :param imageDigest:
+    :param artifactType:
+    :return:
+    """
+
+    account = ApiRequestContextProxy.namespace()
+    try:
+        imageId = _get_image_ok(account, imageDigest)
+
+        client = internal_client_for(PolicyEngineClient, account)
+        resp = client.list_image_analysis_artifacts(user_id=account, image_id=imageId, artifact_type='retrieved_files')
+        return resp, 200
+    except api_exceptions.AnchoreApiError:
+        raise
+    except Exception as err:
+        raise api_exceptions.InternalError(str(err), detail={})
+
+
+@authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
+def list_file_content_search_results(imageDigest):
+    """
+    GET /images/{imageDigest}/artifacts/file_content_search
+    :param imageDigest:
+    :param artifactType:
+    :return:
+    """
+
+    account = ApiRequestContextProxy.namespace()
+    try:
+        imageId = _get_image_ok(account, imageDigest)
+
+        client = internal_client_for(PolicyEngineClient, account)
+        resp = client.list_image_analysis_artifacts(user_id=account, image_id=imageId, artifact_type='file_content_search')
+        return resp, 200
+    except api_exceptions.AnchoreApiError:
+        raise
+    except Exception as err:
+        raise api_exceptions.InternalError(str(err), detail={})
+
+
+@authorizer.requires([ActionBoundPermission(domain=RequestingAccountValue())])
+def list_secret_search_results(imageDigest):
+    """
+    GET /images/{imageDigest}/artifacts/secret_search
+    :param imageDigest:
+    :param artifactType:
+    :return:
+    """
+
+    account = ApiRequestContextProxy.namespace()
+    try:
+        imageId = _get_image_ok(account, imageDigest)
+
+        client = internal_client_for(PolicyEngineClient, account)
+        resp = client.list_image_analysis_artifacts(user_id=account, image_id=imageId, artifact_type='secret_search')
+        return resp, 200
+    except api_exceptions.AnchoreApiError:
+        raise
+    except Exception as err:
+        raise api_exceptions.InternalError(str(err), detail={})

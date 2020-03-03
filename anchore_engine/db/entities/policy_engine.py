@@ -7,8 +7,8 @@ import zlib
 from collections import namedtuple
 
 from sqlalchemy import Column, BigInteger, Integer, LargeBinary, Float, Boolean, String, ForeignKey, Enum, \
-    ForeignKeyConstraint, DateTime, types, Text, Index, JSON, or_, and_, Sequence
-from sqlalchemy.orm import relationship
+    ForeignKeyConstraint, DateTime, types, Text, Index, JSON, or_, and_, Sequence, func, event
+from sqlalchemy.orm import relationship, synonym, joinedload
 
 from anchore_engine.utils import ensure_str, ensure_bytes
 
@@ -54,6 +54,14 @@ hash_length = 80
 
 DistroTuple = namedtuple('DistroTuple', ['distro', 'version', 'flavor'])
 
+base_score_key = 'base_score'
+exploitability_score_key = 'exploitability_score'
+impact_score_key = 'impact_score'
+base_metrics_key = 'base_metrics'
+cvss_v3_key = 'cvss_v3'
+cvss_v2_key = 'cvss_v2'
+
+
 # Feeds
 class FeedMetadata(Base, UtilMixin):
     __tablename__ = 'feeds'
@@ -73,6 +81,16 @@ class FeedMetadata(Base, UtilMixin):
     def __repr__(self):
         return '<{}(name={}, access_tier={}, created_at={}>'.format(self.__class__, self.name, self.access_tier, self.created_at.isoformat())
 
+    def to_json(self, include_groups=True):
+        j = super().to_json()
+
+        if include_groups:
+            j['groups'] = [g.to_json() for g in self.groups]
+        else:
+            j['groups'] = None
+
+        return j
+
 
 class FeedGroupMetadata(Base, UtilMixin):
     __tablename__ = 'feed_groups'
@@ -89,6 +107,14 @@ class FeedGroupMetadata(Base, UtilMixin):
         return '<{} name={}, feed={}, access_tier={}, created_at={}>'.format(self.__class__, self.name, self.feed_name, self.access_tier,
                                                                               self.created_at)
 
+    def to_json(self, include_feed=False):
+        j = super().to_json()
+        if include_feed:
+            j['feed'] = self.feed.to_json(include_groups=False) # Avoid the loop
+        else:
+            j['feed'] = None # Ensure no non-serializable stuff
+
+        return j
 
 class GenericFeedDataRecord(Base):
     """
@@ -137,8 +163,7 @@ class NpmMetadata(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     def __repr__(self):
-        return '<{} name={}, sourcepkg={}, created_at={}>'.format(self.__class__, self.name, self.sourcepkg,
-                                                                              self.created_at.isoformat())
+        return '<{} name={}, sourcepkg={}, created_at={}>'.format(self.__class__, self.name, self.sourcepkg, self.created_at)
 
     def key_tuple(self):
         return self.name
@@ -173,10 +198,6 @@ class Vulnerability(Base):
                 return(json.loads(self.metadata_json))
             return(self.metadata_json)
         return(None)
-        #if self.metadata_json:
-        #    return json.loads(self.metadata_json)
-        #else:
-        #    return None
 
     @additional_metadata.setter
     def additional_metadata(self, value):
@@ -224,6 +245,49 @@ class Vulnerability(Base):
         except:
             sev = "Unknown"
         return(sev)
+
+    def get_nvd_vulnerabilities(self, cvss_version=3, _nvd_cls=None, _cpe_cls=None):
+        ret = []
+
+        db = get_thread_scoped_session()
+        if not _nvd_cls or not _cpe_cls:
+            _nvd_cls, _cpe_cls = select_nvd_classes(db)
+
+        try:
+            cves = self.get_nvd_identifiers(_nvd_cls, _cpe_cls)
+            nvd_records = db.query(_nvd_cls).filter(_nvd_cls.name.in_(cves)).all()
+        except Exception as err:
+            log.warn("failed to gather NVD information for vulnerability due to exception: {}".format(str(err)))
+            nvd_records = None
+
+        if nvd_records:
+            ret = nvd_records
+
+        return(ret)
+
+    def get_nvd_identifiers(self,_nvd_cls, _cpe_cls):
+        cves = []
+        try:
+            if self.id.startswith('CVE-'):
+                cves = [self.id]
+
+            if self.metadata_json.get("CVE", []):
+                for cve_el in self.metadata_json.get("CVE", []):
+                    if type(cve_el) == dict:
+                        # RHSA and ELSA internal elements are dicts
+                        cve_id = cve_el.get('Name', None)
+                    elif type(cve_el) == str:
+                        # ALAS internal elements are just CVE ids
+                        cve_id = cve_el
+                    else:
+                        cve_id = None
+
+                    if cve_id and cve_id not in cves:
+                        cves.append(cve_id)
+        except Exception as err:
+            log.warn("failed to gather NVD information for vulnerability due to exception: {}".format(str(err)))
+
+        return cves
 
 
 class VulnerableArtifact(Base):
@@ -287,6 +351,7 @@ class VulnerableArtifact(Base):
         # Newer or the same
         return False
 
+
 class FixedArtifact(Base):
     """
     A record indicating an artifact version that marks a fix for a vulnerability
@@ -305,9 +370,20 @@ class FixedArtifact(Base):
     fix_metadata = Column(StringJSON, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    fix_observed_at = Column(DateTime)
 
     __table_args__ = (ForeignKeyConstraint(columns=[vulnerability_id, namespace_name],
                                            refcolumns=[Vulnerability.id, Vulnerability.namespace_name]), {})
+
+    @staticmethod
+    def _fix_observed_at_update(mapper, connection, target):
+        if not target.fix_observed_at and target.version and target.version != 'None':
+            target.fix_observed_at = datetime.datetime.utcnow()
+
+    @classmethod
+    def __declare_last__(cls):
+        event.listen(cls, 'before_update', cls._fix_observed_at_update)
+        event.listen(cls, 'before_insert', cls._fix_observed_at_update)
 
     def __repr__(self):
         return '<{} name={}, version={}, vulnerability_id={}, namespace_name={}, created_at={}>'.format(self.__class__, self.name, self.version, self.vulnerability_id, self.namespace_name, self.created_at)
@@ -340,19 +416,18 @@ class FixedArtifact(Base):
             return True
 
         # Is the package older than the fix?
-        if flavor == 'RHEL':
-            if rpm_compare_versions(package_obj.name, package_obj.fullversion, fix_obj.name, fix_obj.epochless_version) < 0:
-                log.spew('rpm Compared: {} < {}: True'.format(package_obj.fullversion, fix_obj.epochless_version))
+        if flavor == 'RHEL':  # compare full package version with full fixed-in version, epoch handled in compare fn. fixes issue-265
+            if rpm_compare_versions(package_obj.fullversion, fix_obj.version) < 0:
+                log.spew('rpm Compared: {} < {}: True'.format(package_obj.fullversion, fix_obj.version))
                 return True
-        elif flavor == 'DEB':
-            if dpkg_compare_versions(package_obj.fullversion, 'lt', fix_obj.epochless_version):
-                log.spew('dpkg Compared: {} < {}: True'.format(package_obj.fullversion, fix_obj.epochless_version))
+        elif flavor == 'DEB':  # compare full package version with full fixed-in version, epoch handled in compare fn. fixes issue-265
+            if dpkg_compare_versions(package_obj.fullversion, 'lt', fix_obj.version):
+                log.spew('dpkg Compared: {} < {}: True'.format(package_obj.fullversion, fix_obj.version))
                 return True
-        elif flavor == 'ALPINE':
+        elif flavor == 'ALPINE':  # compare full package version with epochless fixed-in version
             if apkg_compare_versions(package_obj.fullversion, 'lt', fix_obj.epochless_version):
                 log.spew('apkg Compared: {} < {}: True'.format(package_obj.fullversion, fix_obj.epochless_version))
                 return True
-
 
         if package_obj.pkg_type in ['java', 'maven', 'npm', 'gem', 'python', 'js']:
             if package_obj.pkg_type in ['java', 'maven']:
@@ -382,6 +457,8 @@ class NvdMetadata(Base):
     vulnerable_software = Column(StringJSON)
     summary = Column(String)
     cvss = Column(StringJSON)
+    cvssv3 = None
+    cvssv2 = None
     vulnerable_cpes = relationship('CpeVulnerability', back_populates='parent', cascade='all, delete-orphan')
     created_at = Column(DateTime, default=datetime.datetime.utcnow)  # TODO: make these server-side
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
@@ -389,22 +466,599 @@ class NvdMetadata(Base):
     def __repr__(self):
         return '<{} name={}, created_at={}>'.format(self.__class__, self.name, self.created_at)
 
-    def get_severity(self):
-        sev = "Unknown"
-        try:
-            cvss_json = json.loads(self.cvss)
-            score = float(cvss_json['base_metrics']['score'])
-            if score <= 3.9:
-                sev = "Low"
-            elif score <= 6.9:
-                sev = "Medium"
-            elif score <= 10.0:
-                sev = "High"
+    @property
+    def description(self):
+        return self.summary if self.summary else ''
+
+    @property
+    def references(self):
+        return []
+
+    def get_max_base_score_nvd(self, cvss_version=3):
+        if cvss_version == 3:
+            score = None
+        elif cvss_version == 2:
+            score = self.cvss.get(base_metrics_key, {}).get('score', None)
+        else:
+            log.warn("invalid cvss version specified as input ({})".format(cvss_version))
+            score = None
+
+        if score is None:
+            ret = -1.0
+        else:
+            try:
+                ret = float(score)
+            except:
+                ret = -1.0
+
+        return ret
+
+    def get_max_exploitability_score_nvd(self, cvss_version=3):
+        return -1.0
+
+    def get_max_impact_score_nvd(self, cvss_version=3):
+        return -1.0
+
+    def get_max_cvss_score_nvd(self, cvss_version=3):
+        if cvss_version == 3:
+            ret = {
+                base_score_key: -1.0,
+                exploitability_score_key: -1.0,
+                impact_score_key: -1.0,
+            }
+        elif cvss_version == 2:
+            ret = {
+                base_score_key: self.get_max_base_score_nvd(cvss_version),
+                exploitability_score_key: -1.0,
+                impact_score_key: -1.0,
+            }
+
+        else:
+            log.warn("invalid cvss version specified as input ({})".format(cvss_version))
+            ret = {
+                base_score_key: -1.0,
+                exploitability_score_key: -1.0,
+                impact_score_key: -1.0,
+            }
+
+        return ret
+
+    def get_cvss_scores_nvd(self):
+        ret = [{
+            'id': self.name,
+            cvss_v2_key: self.get_max_cvss_score_nvd(cvss_version=2),
+            cvss_v3_key: self.get_max_cvss_score_nvd(cvss_version=3)
+        }]
+
+        return ret
+
+    def get_cvss_data_nvd(self):
+        ret = [{
+            'id': self.name,
+            cvss_v2_key: self.cvssv2 if self.cvssv2 else None,
+            cvss_v3_key: self.cvssv3 if self.cvssv3 else None
+        }]
+
+        return ret
+
+    # vendor scores
+
+    def get_max_base_score_vendor(self, cvss_version=3):
+        return -1.0
+
+    def get_max_exploitability_score_vendor(self, cvss_version=3):
+        return -1.0
+
+    def get_max_impact_score_vendor(self, cvss_version=3):
+        return -1.0
+
+    def get_max_cvss_score_vendor(self, cvss_version=3):
+        ret = {
+            base_score_key: -1.0,
+            exploitability_score_key: -1.0,
+            impact_score_key: -1.0,
+        }
+        return ret
+
+    def get_cvss_scores_vendor(self):
+        return []
+
+    def get_cvss_data_vendor(self):
+        return []
+
+    @property
+    def link(self):
+        return 'https://nvd.nist.gov/vuln/detail/{}'.format(self.name)
+
+    def key_tuple(self):
+        return self.name
+
+
+class NvdV2Metadata(Base):
+    __tablename__ = 'feed_data_nvdv2_vulnerabilities'
+
+    name = Column(String, primary_key=True)
+    namespace_name = Column(String, primary_key=True)  # e.g. nvddb:2018"
+    severity = Column(Enum('Unknown', 'Negligible', 'Low', 'Medium', 'High', 'Critical', name='vulnerability_severities'), nullable=False, index=True)
+    description = Column(String, nullable=True)
+    cvss_v2 = Column(JSON, nullable=True)
+    cvss_v3 = Column(JSON, nullable=True)
+    link = Column(String, nullable=True)
+    references = Column(JSON, nullable=True)
+    vulnerable_cpes = relationship('CpeV2Vulnerability', back_populates='parent', cascade='all, delete-orphan')
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)  # TODO: make these server-side
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    def __repr__(self):
+        return '<{} name={}, created_at={}>'.format(self.__class__, self.name, self.created_at)
+
+    def _get_score(self, metric, score_key):
+        if metric:
+            score = metric.get(base_metrics_key).get(score_key, -1.0)
+            try:
+                score = float(score)
+            except:
+                score = -1.0
+        else:
+            score = -1.0
+
+        return score
+
+    def _get_metric(self, cvss_version=3):
+        metric = None
+        if cvss_version == 3:
+            metric = self.cvss_v3
+        elif cvss_version == 2:
+            metric = self.cvss_v2
+        else:
+            log.warn("invalid cvss version specified as input ({})".format(cvss_version))
+
+        return metric
+
+    def get_max_base_score_nvd(self, cvss_version=3):
+        metric = self._get_metric(cvss_version)
+        return self._get_score(metric, base_score_key)
+
+    def get_max_exploitability_score_nvd(self, cvss_version=3):
+        metric = self._get_metric(cvss_version)
+        return self._get_score(metric, exploitability_score_key)
+
+    def get_max_impact_score_nvd(self, cvss_version=3):
+        metric = self._get_metric(cvss_version)
+        return self._get_score(metric, impact_score_key)
+
+    def get_max_cvss_score_nvd(self, cvss_version=3):
+        metric = self._get_metric(cvss_version)
+        ret = {
+            base_score_key: self._get_score(metric, base_score_key),
+            exploitability_score_key: self._get_score(metric, exploitability_score_key),
+            impact_score_key: self._get_score(metric, impact_score_key),
+        }
+
+        return ret
+
+    def get_cvss_scores_nvd(self):
+        ret = [{
+            'id': self.name,
+            cvss_v2_key: self.get_max_cvss_score_nvd(cvss_version=2),
+            cvss_v3_key: self.get_max_cvss_score_nvd(cvss_version=3)
+        }]
+
+        return ret
+
+    def get_cvss_data_nvd(self):
+        ret = [{
+            'id': self.name,
+            cvss_v2_key: self._get_metric(cvss_version=2),
+            cvss_v3_key: self._get_metric(cvss_version=3)
+        }]
+
+        return ret
+
+    # vendor scores
+
+    def get_max_base_score_vendor(self, cvss_version=3):
+        return -1.0
+
+    def get_max_exploitability_score_vendor(self, cvss_version=3):
+        return -1.0
+
+    def get_max_impact_score_vendor(self, cvss_version=3):
+        return -1.0
+
+    def get_max_cvss_score_vendor(self, cvss_version=3):
+        ret = {
+            base_score_key: -1.0,
+            exploitability_score_key: -1.0,
+            impact_score_key: -1.0,
+        }
+        return ret
+
+    def get_cvss_scores_vendor(self):
+        return []
+
+    def get_cvss_data_vendor(self):
+        return []
+
+    def key_tuple(self):
+        return self.name
+
+
+class VulnDBMetadata(Base):
+    __tablename__ = 'feed_data_vulndb_vulnerabilities'
+
+    name = Column(String, primary_key=True)
+    namespace_name = Column(String, primary_key=True)  # e.g. vulndb:vulnerabilities
+    severity = Column(
+        Enum('Unknown', 'Negligible', 'Low', 'Medium', 'High', 'Critical', name='vulnerability_severities'),
+        nullable=False, index=True)
+    title = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+    solution = Column(String, nullable=True)
+    vendor_product_info = Column(JSON, nullable=True)
+    references = Column(JSON, nullable=True)
+    vulnerable_packages = Column(JSON, nullable=True)
+    vulnerable_libraries = Column(JSON, nullable=True)
+    vendor_cvss_v2 = Column(JSON, nullable=True)
+    vendor_cvss_v3 = Column(JSON, nullable=True)
+    nvd = Column(JSON, nullable=True)
+    vuln_metadata = Column(JSON, nullable=True)
+    cpes = relationship('VulnDBCpe', back_populates='parent', cascade='all, delete-orphan')
+    # unaffected_cpes = relationship('VulnDBUnaffectedCpe', back_populates='parent', cascade='all, delete-orphan')
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    def __repr__(self):
+        return '<{} name={}, created_at={}>'.format(self.__class__, self.name, self.created_at)
+
+    def _get_max_cvss_v3_metric_nvd(self):
+        cvss_v3 = None
+        if self.nvd:
+            if len(self.nvd) == 1:
+                cvss_v3 = self.nvd[0].get(cvss_v3_key, None)
             else:
-                sev = "Unknown"
-        except:
-            sev = "Unknown"
-        return(sev)
+                max_score = None
+                for nvd_item in self.nvd:
+                    if nvd_item.get(cvss_v3_key, None):
+                        if not max_score or nvd_item.get(cvss_v3_key).get(base_metrics_key).get(base_score_key) > max_score:
+                            max_score = nvd_item.get(cvss_v3_key).get(base_metrics_key).get(base_score_key)
+                            cvss_v3 = nvd_item.get(cvss_v3_key)
+                        else:
+                            continue
+        return cvss_v3
+
+    def _get_max_cvss_v2_metric_nvd(self):
+        cvss_v2 = None
+        if self.nvd:
+            if len(self.nvd) == 1:
+                cvss_v2 = self.nvd[0].get(cvss_v2_key, None)
+            else:
+                max_score = None
+                for nvd_item in self.nvd:
+                    if nvd_item.get(cvss_v2_key, None):
+                        if not max_score or nvd_item.get(cvss_v2_key).get(base_metrics_key).get(base_score_key) > max_score:
+                            max_score = nvd_item.get(cvss_v2_key).get(base_metrics_key).get(base_score_key)
+                            cvss_v2 = nvd_item.get(cvss_v2_key)
+                        else:
+                            continue
+        return cvss_v2
+
+    def _get_max_cvss_metric_nvd(self, cvss_version):
+        """
+          [
+            {
+              "id": "CVE-2019-5440",
+              "cvss_v2": {
+                "version": "2.0",
+                "vector_string": "AV:N/AC:M/Au:N/C:P/I:P/A:P",
+                "base_metrics": {
+                  "base_score": 6.8,
+                  "exploitability_score": 8.6,
+                  "impact_score": 6.4,
+                  "severity": "Medium"
+                  ...
+                }
+              },
+              "cvss_v3": {
+                "version": "3.0",
+                "vector_string": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "base_metrics": {
+                  "base_score": 8.1,
+                  "exploitability_score": 2.2,
+                  "impact_score": 6.0,
+                  "severity": "High"
+                  ...
+                }
+              }
+            },
+            {
+              "id": "CVE-2019-5441",
+              "cvss_v2": {
+                "version": "2.0",
+                "vector_string": "AV:N/AC:M/Au:N/C:P/I:P/A:P",
+                "base_metrics": {
+                  "base_score": 6.8,
+                  "exploitability_score": 8.6,
+                  "impact_score": 6.4,
+                  "severity": "Medium"
+                  ...
+                }
+              },
+              "cvss_v3": {
+                "version": "3.0",
+                "vector_string": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "base_metrics": {
+                  "base_score": 8.1,
+                  "exploitability_score": 2.2,
+                  "impact_score": 6.0,
+                  "severity": "High"
+                  ...
+                }
+              }
+            },
+          ]
+
+        :param cvss_version:
+        :return:
+        """
+
+        metric = None
+        if cvss_version == 3:
+            metric = self._get_max_cvss_v3_metric_nvd()
+        elif cvss_version == 2:
+            metric = self._get_max_cvss_v2_metric_nvd()
+        else:
+            log.warning('invalid cvss version specified as input ({})'.format(cvss_version))
+
+        return metric
+
+    def _get_max_cvss_v3_metric_rbs(self):
+        cvss_v3 = None
+        if self.vendor_cvss_v3:
+            if len(self.vendor_cvss_v3) == 1:
+                cvss_v3 = self.vendor_cvss_v3[0]
+            else:
+                max_score = None
+                for cvss_item in self.vendor_cvss_v3:
+                    if not max_score or cvss_item.get(base_metrics_key).get(base_score_key) > max_score:
+                        max_score = cvss_item.get(base_metrics_key).get(base_score_key)
+                        cvss_v3 = cvss_item
+                    else:
+                        continue
+        return cvss_v3
+
+    def _get_highest_cvss_v2_rbs(self):
+        cvss_v2 = None
+        if self.vendor_cvss_v2:
+            if len(self.vendor_cvss_v2) == 1:
+                cvss_v2 = self.vendor_cvss_v2[0]
+            else:
+                max_score = None
+                for cvss_item in self.vendor_cvss_v2:
+                    if not max_score or cvss_item.get(base_metrics_key).get(base_score_key) > max_score:
+                        max_score = cvss_item.get(base_metrics_key).get(base_score_key)
+                        cvss_v2 = cvss_item
+                    else:
+                        continue
+        return cvss_v2
+
+    def _get_max_cvss_metric_rbs(self, cvss_version):
+        """
+          cvss_version is a list in format
+          [
+            {
+              "version": "3.0",
+              "vector_string": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "base_metrics": {
+                "base_score": 8.1,
+                "exploitability_score": 2.2,
+                "impact_score": 6.0,
+                "severity": "High"
+                ...
+              }
+            },
+            {
+              "version": "3.0",
+              "vector_string": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+              "base_metrics": {
+                "base_score": 8.1,
+                "exploitability_score": 2.2,
+                "impact_score": 6.0,
+                "severity": "High"
+                ...
+              }
+            }
+          ]
+        :param cvss_version:
+        :return:
+        """
+
+        metric = None
+        if cvss_version == 3:
+            metric = self._get_max_cvss_v3_metric_rbs()
+        elif cvss_version == 2:
+            metric = self._get_highest_cvss_v2_rbs()
+        else:
+            log.warning('invalid cvss version specified as input ({})'.format(cvss_version))
+
+        return metric
+
+    def _get_score(self, metric, score_key):
+        if metric:
+            score = metric.get(base_metrics_key).get(score_key, -1.0)
+            try:
+                score = float(score)
+            except:
+                score = -1.0
+        else:
+            score = -1.0
+
+        return score
+
+    # nvd scores
+
+    def get_max_base_score_nvd(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_nvd(cvss_version)
+        return self._get_score(metric, base_score_key)
+
+    def get_max_exploitability_score_nvd(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_nvd(cvss_version)
+        return self._get_score(metric, exploitability_score_key)
+
+    def get_max_impact_score_nvd(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_nvd(cvss_version)
+        return self._get_score(metric, impact_score_key)
+
+    def get_max_cvss_score_nvd(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_nvd(cvss_version)
+        ret = {
+            base_score_key: self._get_score(metric, base_score_key),
+            exploitability_score_key: self._get_score(metric, exploitability_score_key),
+            impact_score_key: self._get_score(metric, impact_score_key)
+        }
+
+        return ret
+
+    def get_cvss_scores_nvd(self):
+        result = []
+        for nvd_cvss_item in self.get_cvss_data_nvd():
+            """
+            nvd_cvss_item is in the format
+            {
+              "id": "CVE-2019-5441",
+              "cvss_v2": {
+                "version": "2.0",
+                "vector_string": "AV:N/AC:M/Au:N/C:P/I:P/A:P",
+                "base_metrics": {
+                  "base_score": 6.8,
+                  "exploitability_score": 8.6,
+                  "impact_score": 6.4,
+                  "severity": "Medium"
+                  ...
+                }
+              },
+              "cvss_v3": {
+                "version": "3.0",
+                "vector_string": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                "base_metrics": {
+                  "base_score": 8.1,
+                  "exploitability_score": 2.2,
+                  "impact_score": 6.0,
+                  "severity": "High"
+                  ...
+                }
+              }
+            }
+            """
+            cvss_v2_metric = nvd_cvss_item.get(cvss_v2_key, None)
+            cvss_v3_metric = nvd_cvss_item.get(cvss_v3_key, None)
+            score_item = {
+                'id': nvd_cvss_item.get('id'),
+                cvss_v2_key: {
+                    base_score_key: self._get_score(cvss_v2_metric, base_score_key),
+                    exploitability_score_key: self._get_score(cvss_v2_metric, exploitability_score_key),
+                    impact_score_key: self._get_score(cvss_v2_metric, impact_score_key)
+                },
+                cvss_v3_key: {
+                    base_score_key: self._get_score(cvss_v3_metric, base_score_key),
+                    exploitability_score_key: self._get_score(cvss_v3_metric, exploitability_score_key),
+                    impact_score_key: self._get_score(cvss_v3_metric, impact_score_key)
+                }
+            }
+            result.append(score_item)
+
+    def get_cvss_data_nvd(self):
+        return self.nvd if self.nvd else []
+
+    # vendor scores
+
+    def get_max_base_score_vendor(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_rbs(cvss_version)
+        return self._get_score(metric, base_score_key)
+
+    def get_max_exploitability_score_vendor(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_rbs(cvss_version)
+        return self._get_score(metric, exploitability_score_key)
+
+    def get_max_impact_score_vendor(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_rbs(cvss_version)
+        return self._get_score(metric, impact_score_key)
+
+    def get_max_cvss_score_vendor(self, cvss_version=3):
+        metric = self._get_max_cvss_metric_rbs(cvss_version)
+        ret = {
+            base_score_key: self._get_score(metric, base_score_key),
+            exploitability_score_key: self._get_score(metric, exploitability_score_key),
+            impact_score_key: self._get_score(metric, impact_score_key)
+        }
+
+        return ret
+
+    def get_cvss_scores_vendor(self):
+        results = []
+
+        if self.vendor_cvss_v2:
+            for cvss_v2_item in self.vendor_cvss_v2:
+                results.append({
+                    'id': self.name,
+                    cvss_v2_key: {
+                        base_score_key: self._get_score(cvss_v2_item, base_score_key),
+                        exploitability_score_key: self._get_score(cvss_v2_item, exploitability_score_key),
+                        impact_score_key: self._get_score(cvss_v2_item, impact_score_key)
+                    },
+                    cvss_v3_key: {
+                        base_score_key: -1.0,
+                        exploitability_score_key: -1.0,
+                        impact_score_key: -1.0
+                    }
+                })
+
+        if self.vendor_cvss_v3:
+            for cvss_v3_item in self.vendor_cvss_v3:
+                results.append({
+                    'id': self.name,
+                    cvss_v2_key: {
+                        base_score_key: -1.0,
+                        exploitability_score_key: -1.0,
+                        impact_score_key: -1.0
+                    },
+                    cvss_v3_key: {
+                        base_score_key: self._get_score(cvss_v3_item, base_score_key),
+                        exploitability_score_key: self._get_score(cvss_v3_item, exploitability_score_key),
+                        impact_score_key: self._get_score(cvss_v3_item, impact_score_key)
+                    }
+                })
+
+        return results
+
+    def get_cvss_data_vendor(self):
+        results = []
+
+        if self.vendor_cvss_v2:
+            for cvss_v2_item in self.vendor_cvss_v2:
+                results.append({
+                    'id': self.name,
+                    cvss_v2_key: cvss_v2_item,
+                    cvss_v3_key: None
+                })
+
+        if self.vendor_cvss_v3:
+            for cvss_v3_item in self.vendor_cvss_v3:
+                results.append({
+                    'id': self.name,
+                    cvss_v2_key: None,
+                    cvss_v3_key: cvss_v3_item
+                })
+
+        return results
+
+    @property
+    def link(self):
+        return None
+
+    @property
+    def vulnerable_cpes(self):
+        return [cpe for cpe in self.cpes if cpe.is_affected]
 
     def key_tuple(self):
         return self.name
@@ -432,6 +1086,7 @@ class CpeVulnerability(Base):
     __table_args__ = (
         ForeignKeyConstraint(columns=[vulnerability_id, namespace_name, severity], refcolumns=[NvdMetadata.name, NvdMetadata.namespace_name, NvdMetadata.severity]),
         Index('ix_feed_data_cpe_vulnerabilities_name_version', name, version),
+        Index('ix_feed_data_cpe_vulnerabilities_fk', vulnerability_id, namespace_name, severity),
         {}
     )
 
@@ -453,6 +1108,171 @@ class CpeVulnerability(Base):
             ret = None
 
         return(ret)
+
+    def get_fixed_in(self):
+        return []
+
+
+class CpeV2Vulnerability(Base):
+    __tablename__ = 'feed_data_cpev2_vulnerabilities'
+
+    feed_name = Column(String, primary_key=True)
+    namespace_name = Column(String, primary_key=True)
+    vulnerability_id = Column(String, primary_key=True)
+    part = Column(String, primary_key=True)
+    vendor = Column(String, primary_key=True)
+    product = Column(String, primary_key=True)
+    name = synonym("product")
+    version = Column(String, primary_key=True)
+    update = Column(String, primary_key=True)
+    edition = Column(String, primary_key=True)
+    language = Column(String, primary_key=True)
+    sw_edition = Column(String, primary_key=True)
+    target_sw = Column(String, primary_key=True)
+    target_hw = Column(String, primary_key=True)
+    other = Column(String, primary_key=True)
+    parent = relationship('NvdV2Metadata', back_populates='vulnerable_cpes')
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)  # TODO: make these server-side
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    # This is necessary for ensuring correct FK behavior against a composite foreign key
+    __table_args__ = (
+        ForeignKeyConstraint(columns=[vulnerability_id, namespace_name], refcolumns=[NvdV2Metadata.name, NvdV2Metadata.namespace_name]),
+        Index('ix_feed_data_cpev2_vulnerabilities_name_version', product, version),
+        Index('ix_feed_data_cpev2_vulnerabilities_fk', vulnerability_id, namespace_name),
+        {}
+    )
+
+    def __repr__(self):
+        return '<{} feed_name={}, vulnerability_id={}, product={}, version={}, created_at={}>'.format(self.__class__, self.feed_name, self.vulnerability_id, self.product, self.version, self.created_at.isoformat())
+
+    def get_cpestring(self):
+        ret = None
+        try:
+            final_cpe = ['cpe', '-', '-', '-', '-', '-', '-']
+            final_cpe[1] = "/" + self.part
+            final_cpe[2] = self.vendor
+            final_cpe[3] = self.product
+            final_cpe[4] = self.version
+            final_cpe[5] = self.update
+            final_cpe[6] = self.other
+            ret = ':'.join(final_cpe)
+        except:
+            ret = None
+
+        return(ret)
+
+    def get_cpe23string(self):
+        ret = None
+        try:
+            final_cpe = ['cpe', '2.3', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-']
+            final_cpe[2] = self.part
+            final_cpe[3] = self.vendor
+            final_cpe[4] = self.product
+            final_cpe[5] = self.version
+            final_cpe[6] = self.update
+            final_cpe[7] = self.edition
+            final_cpe[8] = self.language
+            final_cpe[9] = self.sw_edition
+            final_cpe[10] = self.target_sw
+            final_cpe[11] = self.target_hw
+            final_cpe[12] = self.other
+            ret = ':'.join(final_cpe)
+        except:
+            ret = None
+
+        return(ret)
+
+    def get_fixed_in(self):
+        return []
+
+
+class VulnDBCpe(Base):
+    __tablename__ = 'feed_data_vulndb_cpes'
+
+    feed_name = Column(String, primary_key=True)
+    namespace_name = Column(String, primary_key=True)
+    vulnerability_id = Column(String, primary_key=True)
+    part = Column(String, primary_key=True)
+    vendor = Column(String, primary_key=True)
+    product = Column(String, primary_key=True)
+    name = synonym("product")
+    version = Column(String, primary_key=True)
+    update = Column(String, primary_key=True)
+    edition = Column(String, primary_key=True)
+    language = Column(String, primary_key=True)
+    sw_edition = Column(String, primary_key=True)
+    target_sw = Column(String, primary_key=True)
+    target_hw = Column(String, primary_key=True)
+    other = Column(String, primary_key=True)
+    is_affected = Column(Boolean, primary_key=True)
+    parent = relationship('VulnDBMetadata', back_populates='cpes')
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)  # TODO: make these server-side
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    # This is necessary for ensuring correct FK behavior against a composite foreign key
+    __table_args__ = (
+        ForeignKeyConstraint(columns=[vulnerability_id, namespace_name], refcolumns=[VulnDBMetadata.name, VulnDBMetadata.namespace_name]),
+        Index('ix_feed_data_vulndb_affected_cpes_product_version', product, version),
+        Index('ix_feed_data_vulndb_affected_cpes_fk', vulnerability_id, namespace_name),
+        {}
+    )
+
+    def __repr__(self):
+        return '<{} feed_name={}, vulnerability_id={}, product={}, version={}, created_at={}>'.format(self.__class__, self.feed_name, self.vulnerability_id, self.product, self.version, self.created_at.isoformat())
+
+    def get_cpestring(self):
+        ret = None
+        try:
+            if self.sw_edition or self.target_sw or self.target_hw or self.other:
+                edition = '~{}~{}~{}~{}~{}'.format(self.edition, self.sw_edition, self.target_sw, self.target_hw, self.other)
+            else:
+                edition = self.edition
+
+            uri_parts = [
+                'cpe',
+                '/' + self.part,
+                self.vendor,
+                self.product,
+                self.version,
+                self.update,
+                edition,
+                self.language,
+            ]
+
+            uri = ':'.join(uri_parts)
+            ret = uri.strip(':')  # remove any trailing :
+        except:
+            ret = None
+
+        return ret
+
+    def get_cpe23string(self):
+        ret = None
+        try:
+            final_cpe = ['cpe',
+                         '2.3',
+                         self.part,
+                         self.vendor,
+                         self.product,
+                         self.version,
+                         self.update,
+                         self.edition,
+                         self.language,
+                         self.sw_edition,
+                         self.target_sw,
+                         self.target_hw,
+                         self.other]
+
+            ret = ':'.join(final_cpe)
+        except:
+            ret = None
+
+        return ret
+
+    def get_fixed_in(self):
+        return [cpe.version for cpe in self.parent.cpes
+                if not cpe.is_affected and cpe.product == self.product and cpe.vendor == self.vendor and cpe.part == self.part]
 
 
 # Analysis Data for Images
@@ -488,7 +1308,7 @@ class ImagePackage(Base):
     metadata_json = Column(StringJSON)
 
     license = Column(String(1024), default='N/A')
-    size = Column(Integer, nullable=True)
+    size = Column(BigInteger, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -528,7 +1348,7 @@ class ImagePackage(Base):
         props = {}
         for line in filebuf.splitlines():
             #line = anchore_engine.utils.ensure_str(line)
-            if not re.match("\s*(#.*)?$", line):
+            if not re.match(r"\s*(#.*)?$", line):
                 kv = line.split('=')
                 key = kv[0].strip()
                 value = '='.join(kv[1:]).strip()
@@ -799,6 +1619,25 @@ class ImageCpe(Base):
 
         return(ret)
 
+    def get_cpe23string(self):
+        ret = None
+        try:
+            final_cpe = ['cpe', '2.3', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-']
+            final_cpe[2] = self.cpetype[1]
+            final_cpe[3] = self.vendor
+            final_cpe[4] = self.name
+            final_cpe[5] = self.version
+            final_cpe[6] = self.update
+            #final_cpe[7] = self.edition
+            #final_cpe[8] = self.language
+            #final_cpe[9] = self.sw_edition
+            #final_cpe[10] = self.target_sw
+            #final_cpe[11] = self.target_hw
+            final_cpe[12] = self.meta
+            ret = ':'.join(final_cpe)
+        except:
+            ret = None
+        return(ret)
 
 class FilesystemAnalysis(Base):
     """
@@ -878,7 +1717,7 @@ class AnalysisArtifact(Base):
     image_id = Column(String(image_id_length), primary_key=True)
     image_user_id = Column(String(user_id_length), primary_key=True)
     analyzer_id = Column(String(128), primary_key=True) # The name of the analyzer (e.g. layer_info)
-    analyzer_artifact = Column(String(128), primary_key=True) # The analyer artifact name (e.g. layers_to_dockerfile)
+    analyzer_artifact = Column(String(128), primary_key=True) # The analyzer artifact name (e.g. layers_to_dockerfile)
     analyzer_type = Column(String(128), primary_key=True) # The analyzer type (e.g. base, user, or extra)
     artifact_key = Column(String(256), primary_key=True)
     str_value = Column(Text)
@@ -962,17 +1801,31 @@ class Image(Base):
             ImagePackageVulnerability.pkg_image_id == self.id).all()
         return known_vulnerabilities
 
-    def cpe_vulnerabilities(self):
+    def cpe_vulnerabilities(self, _nvd_cls, _cpe_cls):
         """
         Similar to the vulnerabilities function, but using the cpe matches instead, basically the NVD raw data source
 
         :return: list of (image_cpe, cpe_vulnerability) tuples
         """
         db = get_thread_scoped_session()
-        cpe_vulnerabilities = db.query(ImageCpe, CpeVulnerability).filter(ImageCpe.image_id == self.id,
-                                                                              ImageCpe.image_user_id == self.user_id,
-                                                                              ImageCpe.name == CpeVulnerability.name,
-                                                                              ImageCpe.version == CpeVulnerability.version).all()
+        if not _nvd_cls or not _cpe_cls:
+            _nvd_cls, _cpe_cls = select_nvd_classes(db)
+        cpe_vulnerabilities = db.query(ImageCpe, _cpe_cls).filter(
+            ImageCpe.image_id == self.id,
+            ImageCpe.image_user_id == self.user_id,
+            func.lower(ImageCpe.name) == _cpe_cls.name,
+            ImageCpe.version == _cpe_cls.version
+        ).options(joinedload(_cpe_cls.parent, innerjoin=True)).all()
+
+        # vulndb is similar to nvd cpes, add them here
+        cpe_vulnerabilities.extend(
+            db.query(ImageCpe, VulnDBCpe).filter(
+                ImageCpe.image_id == self.id, ImageCpe.image_user_id == self.user_id,
+                func.lower(ImageCpe.name) == VulnDBCpe.name,
+                ImageCpe.version == VulnDBCpe.version,
+                VulnDBCpe.is_affected.is_(True)
+            ).options(joinedload(VulnDBCpe.parent, innerjoin=True)).all())
+
         return cpe_vulnerabilities
 
     def get_image_base(self):
@@ -1186,13 +2039,13 @@ class VersionPreservingDistroMapper(IDistroMapper):
         """
 
         # Parse down to major, minor only if has a subminor
-        patt = re.match('(\d+)\.(\d+)\.(\d+)', distro_version)
+        patt = re.match(r'(\d+)\.(\d+)\.(\d+)', distro_version)
         if patt:
             major, minor, subminor = patt.groups()
             return [distro_version, '{}.{}'.format(major, minor), '{}'.format(major)]
 
         # Parse dow to only major
-        patt = re.match('(\d+)\.(\d+)', distro_version)
+        patt = re.match(r'(\d+)\.(\d+)', distro_version)
         if patt:
             major, minor = patt.groups()
             return [distro_version, '{}.{}'.format(major, minor), '{}'.format(major)]
@@ -1361,3 +2214,21 @@ class CachedPolicyEvaluation(Base):
             return bucket, key
         else:
             raise ValueError('Result type is not an archive')
+
+
+def select_nvd_classes(db=None):
+    if not db:
+        db = get_thread_scoped_session()
+
+    _nvd_cls = NvdMetadata
+    _cpe_cls = CpeVulnerability
+    try:
+        fmd = db.query(FeedMetadata).filter(FeedMetadata.name == 'nvdv2').first()
+        if fmd and fmd.last_full_sync:
+            _nvd_cls = NvdV2Metadata
+            _cpe_cls = CpeV2Vulnerability
+    except Exception as err:
+        log.warn("could not query for nvdv2 sync: {}".format(err))
+
+    log.debug("selected {}/{} nvd classes".format(_nvd_cls, _cpe_cls))
+    return(_nvd_cls, _cpe_cls)

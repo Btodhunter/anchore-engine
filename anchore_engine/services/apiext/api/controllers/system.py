@@ -16,6 +16,7 @@ import anchore_engine.subsys.servicestatus
 import anchore_engine.configuration.localconfig
 from anchore_engine.configuration.localconfig import GLOBAL_RESOURCE_DOMAIN
 from anchore_engine.apis.context import ApiRequestContextProxy
+from anchore_engine.common.errors import AnchoreError
 
 authorizer = get_authorizer()
 
@@ -277,7 +278,7 @@ def get_system_feeds():
         p_client = internal_client_for(PolicyEngineClient, userId=ApiRequestContextProxy.namespace())
         # do the p.e. feed get call
         return_object = p_client.list_feeds(include_counts=True)
-        if return_object:
+        if return_object is not None:
             httpcode = 200
     except Exception as err:
         return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
@@ -295,7 +296,7 @@ def post_system_feeds(flush=False):
         p_client = internal_client_for(PolicyEngineClient, userId=ApiRequestContextProxy.namespace())
         # do the p.e. feed post call
         return_object = p_client.sync_feeds(force_flush=flush)
-        if return_object:
+        if return_object is not None:
             httpcode = 200
     except Exception as err:
         return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
@@ -313,6 +314,25 @@ def describe_policy():
         return_object = p_client.describe_policy()
         if return_object:
             httpcode = 200
+    except Exception as err:
+        return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
+        httpcode = return_object['httpcode']
+
+    return return_object, httpcode
+
+@authorizer.requires([])
+def describe_error_codes():
+    request_inputs = anchore_engine.apis.do_request_prep(request, default_params={})
+    return_object = []
+    httpcode = 500
+    try:
+        for e in AnchoreError:
+            el = {
+                'name': e.name,
+                'description': e.value,
+            }
+            return_object.append(el)
+        httpcode = 200
     except Exception as err:
         return_object = anchore_engine.common.helpers.make_response_error(err, in_httpcode=httpcode)
         httpcode = return_object['httpcode']
