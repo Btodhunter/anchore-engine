@@ -125,6 +125,9 @@ setup_venv() {
         hash virtualenv || (printf "%s\n${ERR}ensure virtualenv is installed before attempting to setup a virtual environment${NC}\n" && exit 1)
     fi
     if [[ ! -x ${PYTHON} ]]; then
-        virtualenv -p python3 "${VENV_NAME}"
+        if ! virtualenv -p python3 "${VENV_NAME}" && [[ "${CI}" == true ]]; then
+            setup_pyenv
+            virtualenv -p python3 "${VENV_NAME}"
+        fi
     fi
 }
