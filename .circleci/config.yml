@@ -232,8 +232,6 @@ workflows:
           name: prod_e2e_tests
           context: e2e-testing
           filters: *filter_semver_tags
-          environment:
-            - E2E_PRODUCTION: true
       - hold_for_approval:
           type: approval
           filters: *filter_semver_tags
