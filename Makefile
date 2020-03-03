@@ -7,6 +7,7 @@ ANCHORE_CLI_VERSION ?=
 DOCKER_USER ?=
 DOCKER_PASS ?=
 GIT_TAG ?=
+VERBOSE ?=
 # Set CI=true when running in CircleCI. This setting will setup the proper env for CircleCI
 # All production & RC image push jobs to Dockerhub are gated on CI=true
 CI ?= false
@@ -30,6 +31,7 @@ HELM_VERSION := v3.1.1
 
 # Make environment configuration
 RUN_COMMAND := scripts/ci/make_run_command
+PRINT := VERBOSE=false $(RUN_COMMAND) print
 ENV := /usr/bin/env
 VENV_NAME := venv
 VENV_ACTIVATE = $(VENV_NAME)/bin/activate
@@ -44,7 +46,7 @@ PYTHON_VERSION := 3.6.6
 .PHONY: build
 build: Dockerfile ## build dev image
 	@$(RUN_COMMAND) build
-	@printf "%s\n\tsuccessfully built image -- $(TEST_IMAGE_NAME)\n"
+	@$(PRINT) "Successfully built image -- " "$(TEST_IMAGE_NAME)"
 
 .PHONY: ci ## run full ci pipeline locally
 ci: test-unit test-integration build test-functional test-e2e push
@@ -131,7 +133,7 @@ clean-container: ## delete dev image
 
 .PHONY: setup-dev
 setup-dev: setup-pyenv venv install-dev ## setup dev environment - install pyenv, python, venv, project
-	@printf "\n\tEnable virtualenv by running:\n\t\tsource $(VENV_ACTIVATE)\n"
+	@$(PRINT) "Use this command to enable the virtual environment: " "source $(VENV_ACTIVATE)"
 
 .PHONY: setup-pyenv
 setup-pyenv: .python-version ## install pyenv, python and set local .python_version

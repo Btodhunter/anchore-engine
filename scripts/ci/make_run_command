@@ -22,8 +22,6 @@ trap_command() {
 }
 
 main() {
-    local COMMAND="$@"
-
     # load all libraries from the 'scripts/ci/make' directory.
     for f in "$(cd "$(dirname ${BASH_SOURCE[0]})" && pwd)"/make/*; do
         . "$f"
@@ -38,23 +36,25 @@ main() {
         printf "%s\t${ERR}ERROR - script requires input${NC}\n\n" >&2
         display_usage
         exit 1
-    elif [[ "${COMMAND}" =~ (help|-h) ]]; then
+    elif [[ "$1" =~ (help|-h) ]]; then
         display_make_usage
     # Check is the COMMAND var is a valid function or executable script
-    elif declare -f "${COMMAND}" &> /dev/null || [[ -x "$COMMAND" ]]; then
+    elif declare -f "$1" &> /dev/null || [[ -x "$1" ]]; then
         # Trap all signals that cause script to exit & run trap_command function before exiting
         trap 'trap_command' SIGINT SIGTERM ERR EXIT
 
         # Trap all bash commands & print to screen. Like using set -v but allows printing in color
-        set -o functrace
-        trap 'printf "%s${INFO}+ $BASH_COMMAND${NC}\n" >&2' DEBUG
+        if [[ "${VERBOSE}" =~ (true|TRUE|y|Y|1) ]]; then
+            set -o functrace
+            trap 'printf "%s${INFO}+ $BASH_COMMAND${NC}\n" >&2' DEBUG
+        fi
 
         # Activate virtualenv if it exists
         if [[ -f "${VENV_ACTIVATE}" ]]; then
             . "${VENV_ACTIVATE}"
         fi
 
-        "${COMMAND}"
+        "$@"
     else
         printf "%s\t${ERR}ERROR - ${COMMAND} is not a valid function or script name ${NC}\n\n" >&2
         display_usage

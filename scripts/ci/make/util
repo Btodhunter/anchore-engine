@@ -85,6 +85,11 @@ kind_cluster_up() {
     helm repo add stable https://kubernetes-charts.storage.googleapis.com
 }
 
+print() {
+    SKIP_CLEANUP=true
+    printf "\n\t${INFO}%s${WARN}%s${NC}\n\n" "$@"
+}
+
 setup_colors() {
     OK="\033[0;32m"
     WARN="\033[0;33m"
@@ -96,7 +101,10 @@ setup_colors() {
 setup_pyenv() {
     local python_binary_name="${PYTHON##*/}"
     # install and configure pyenv
-    if [[ -z "${PYENV_ROOT}" ]] && [[ ! -d "${HOME}"/.pyenv ]]; then
+    if [[ -z "${PYENV_ROOT}" ]]; then
+        export PYENV_ROOT="${HOME}/.pyenv"
+    fi
+    if [[ ! -d "${PYENV_ROOT}" ]]; then
         curl https://pyenv.run | "${SHELL}"
         echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> "${HOME}/.bashrc"
         echo 'eval "$(pyenv init -)"' >> "${HOME}/.bashrc"
@@ -111,10 +119,10 @@ setup_pyenv() {
         printf "%s\n\t${INFO}To enable pyenv in your current shell run:\n\t\t${WARN}exec ${SHELL}${NC}\n\n"
     fi
     if [[ ! -f "${HOME}"/.pyenv/versions/"${PYTHON_VERSION}"/bin/"${python_binary_name}" ]]; then
-        "${HOME}"/.pyenv/bin/pyenv install "${PYTHON_VERSION}"
+        "${PYENV_ROOT}"/bin/pyenv install "${PYTHON_VERSION}"
     fi
     # set local pyenv version
-    "${HOME}"/.pyenv/bin/pyenv local "${PYTHON_VERSION}"
+    "${PYENV_ROOT}"/bin/pyenv local "${PYTHON_VERSION}"
 }
 
 setup_venv() {
