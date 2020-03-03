@@ -44,7 +44,7 @@ install_dev() {
 
 install_cluster_deps() {
     local arch=$(uname | tr A-Z a-z)
-    if [[ ! -x ${VENV}/bin/kind ]]; then
+    if [[ ! -x "${VENV}/bin/kind" ]]; then
         echo 'installing kind...'
         curl -sSLo "${VENV}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
         chmod +x "${VENV}/bin/kind"
@@ -134,7 +134,7 @@ setup_venv() {
         hash pip || (printf "%s\n${ERR}ensure python-pip is installed before attempting to setup virtualenv${NC}\n" && exit 1)
         hash virtualenv || (printf "%s\n${ERR}ensure virtualenv is installed before attempting to setup a virtual environment${NC}\n" && exit 1)
     fi
-    if [[ ! -x ${PYTHON} ]]; then
+    if [[ ! -x "${PYTHON}" ]]; then
         virtualenv -p "${PYTHON##*/}" "${VENV}"
     fi
 }

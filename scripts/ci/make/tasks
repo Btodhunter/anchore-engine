@@ -46,12 +46,12 @@ push_dev_image() {
     echo "Tagging and pushing ${dev_image}"
     docker tag "${TEST_IMAGE_NAME}" "${dev_image}"
     docker push "${dev_image}"
-    if [[ ${GIT_BRANCH} == 'master' ]]; then
+    if [[ "${GIT_BRANCH}" == 'master' ]]; then
         local latest_image="${DEV_IMAGE_REPO}:latest"
         echo "tagging & pushing image -- ${latest_image}"
         docker tag "${dev_image}" "${latest_image}"
         docker push "${latest_image}"
-    elif [[ ${GIT_BRANCH} =~ ${RELEASE_BRANCHES} ]]; then
+    elif [[ "${GIT_BRANCH}" =~ "${RELEASE_BRANCHES}" ]]; then
         local branch_image="${DEV_IMAGE_REPO}:${GIT_BRANCH}"
         echo "tagging & pushing image -- ${branch_image}"
         docker tag "${dev_image}" "${branch_image}"
@@ -93,7 +93,7 @@ push_prod_image() {
         echo "Tagging and pushing image -- ${prod_image}"
         docker tag "${rc_image}" "${prod_image}"
         docker push "${prod_image}"
-        if [[ ${GIT_BRANCH} = ${LATEST_RELEASE_BRANCH} ]]; then
+        if [[ "${GIT_BRANCH}" =~ "${LATEST_RELEASE_BRANCH}" ]]; then
             local latest_image="${PROD_IMAGE_REPO}:latest"
             echo "Tagging and pushing image -- ${latest_image}"
             docker tag "${prod_image}" "${latest_image}"
