@@ -47,8 +47,6 @@
       - /^[0-9]+(\.[0-9]+)$/
       - master
       - /^ci-.*/
-  tags:
-    only: /^v[0-9]+(\.[0-9]+)*-rc[0-9]+$/
 
 .filter_semver_tags: &filter_semver_tags
   branches:
@@ -166,8 +164,6 @@ jobs:
     steps:
       - setup_remote_docker
       - checkout
-      - <<: *attach_workspace
-      - <<: *load_docker_image
       - <<: *ssh_forward_port
       - <<: *docker_login
       - run:
@@ -214,7 +210,13 @@ workflows:
           context: e2e-testing
           filters: *filter_release_branch
           requires:
-            - push_dev_image
+            - push_image
+
+  rc_image_workflow:
+    jobs:
+      - e2e_tests:
+          context: e2e-testing
+          filters: *filter_rc_tags
       - push_image:
           name: push_rc_image
           make_job: push-rc
@@ -222,18 +224,19 @@ workflows:
           filters: *filter_rc_tags
           requires:
             - e2e_tests
-      - anchore/image_scan:
-          name: image_scan
-          context: dockerhub
-          filters: *filter_rc_tags
-          requires:
-            - push_rc_image
-          image_name: '${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}-dev:${CIRCLE_TAG}'
-          private_registry: true
-          timeout: '2000'
+
+  prod_image_workflow:
+    jobs:
+      - e2e_tests:
+          context: e2e-testing
+          filters: *filter_semver_tags
+          environment:
+            - E2E_PRODUCTION: true
       - hold_for_approval:
           type: approval
           filters: *filter_semver_tags
+          requires:
+            - e2e_tests
       - push_image:
           name: push_prod_image
           make_job: push-prod

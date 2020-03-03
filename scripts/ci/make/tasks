@@ -60,7 +60,11 @@ push_dev_image() {
 }
 
 e2e_tests() {
-    local engine_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
+    if [[ "${E2E_PRODUCTION}" == true ]]; then
+        local engine_image="${DEV_IMAGE_REPO}:$(git describe --match "${GIT_TAG}-rc*" --tags --abbrev=0)"
+    else
+        local engine_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
+    fi
     install_testing_deps anchorecli
     # Install stable/anchore-engine Helm chart
     printf "%s\nInstalling stable/anchore-engine Helm chart...\n"
@@ -73,11 +77,12 @@ e2e_tests() {
 }
 
 push_rc_image() {
+    local dev_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
     local rc_image="${DEV_IMAGE_REPO}:${GIT_TAG}"
     if [[ "${CI}" == true ]]; then
         echo "Tagging and pushing image -- ${rc_image}"
-        docker pull "${DEV_IMAGE_REPO}:${COMMIT_SHA}"
-        docker tag "${DEV_IMAGE_REPO}:${COMMIT_SHA}" "${rc_image}"
+        docker pull "${dev_image}"
+        docker tag "${dev_image}" "${rc_image}"
         docker push "${rc_image}"
     else
         echo "CI=true must be set to push image -- ${rc_image}"
@@ -86,7 +91,7 @@ push_rc_image() {
 
 push_prod_image() {
     local prod_image="${PROD_IMAGE_REPO}:${GIT_TAG}"
-    local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "*-rc*" --tags --abbrev=0)"
+    local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "${GIT_TAG}-rc*" --tags --abbrev=0)"
     if [[ "${CI}" == true ]]; then
         echo "Pulling RC image for release -- ${rc_image}"
         docker pull "${rc_image}"
