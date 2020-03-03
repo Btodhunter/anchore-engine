@@ -152,7 +152,6 @@ jobs:
       - <<: *attach_workspace
       - <<: *load_docker_image
       - <<: *ssh_forward_port
-      - <<: *docker_login
       - run_tests:
           test_type: functional
 
