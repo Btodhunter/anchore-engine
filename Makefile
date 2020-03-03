@@ -14,8 +14,7 @@ CI ?= false
 # Set SKIP_CLEANUP=true to prevent all exit cleanup tasks from running
 SKIP_CLEANUP ?= false
 # Use $CIRCLE_SHA if it's set, otherwise use SHA from HEAD
-# COMMIT_SHA ?= $(shell echo $${CIRCLE_SHA:=$$(git rev-parse HEAD)})
-COMMIT_SHA=latest
+COMMIT_SHA ?= $(shell echo $${CIRCLE_SHA:=$$(git rev-parse HEAD)})
 # Use $CIRCLE_PROJECT_REPONAME if it's set, otherwise the git project top level dir name
 GIT_REPO ?= $(shell echo $${CIRCLE_PROJECT_REPONAME:=$$(basename `git rev-parse --show-toplevel`)})
 # Use $CIRCLE_BRANCH if it's set, otherwise use current HEAD branch
@@ -24,8 +23,7 @@ GIT_BRANCH ?= $(shell echo $${CIRCLE_BRANCH:=$$(git rev-parse --abbrev-ref HEAD)
 CLI_COMMIT_SHA ?= $(shell echo $${ANCHORE_CLI_VERSION:=$$(git ls-remote git@github.com:anchore/anchore-cli.git --sort="version:refname" --tags v\* | tail -n1 | awk '{print $$1}')})
 
 # Testing environment configuration
-# TEST_IMAGE_NAME = $(GIT_REPO):dev
-TEST_IMAGE_NAME = anchore/anchore-engine:latest
+TEST_IMAGE_NAME = $(GIT_REPO):dev
 KIND_VERSION := v0.7.0
 KIND_NODE_IMAGE_TAG := v1.15.7@sha256:e2df133f80ef633c53c0200114fce2ed5e1f6947477dbc83261a6a921169488d
 KUBECTL_VERSION := v1.15.0

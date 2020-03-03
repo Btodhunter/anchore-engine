@@ -74,6 +74,7 @@ services:
     - ANCHORE_ENDPOINT_HOSTNAME=engine-policy-engine
     - ANCHORE_DB_HOST=anchore-db
     - ANCHORE_DB_PASSWORD=mysecretpassword
+    - ANCHORE_FEEDS_ENABLED=false
     command: ["anchore-manager", "service", "start", "policy_engine"]
   engine-analyzer:
     image: ${TEST_IMAGE_NAME}
