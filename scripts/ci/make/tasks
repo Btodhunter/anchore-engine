@@ -39,17 +39,20 @@ functional_tests() {
 }
 
 push_dev_image() {
-    echo "Tagging and pushing ${DEV_IMAGE_REPO}:${COMMIT_SHA}"
-    docker tag "${TEST_IMAGE_NAME}" "${DEV_IMAGE_REPO}:${COMMIT_SHA}"
-    docker push "${DEV_IMAGE_REPO}:${COMMIT_SHA}"
+    local dev_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
+    echo "Tagging and pushing ${dev_image}"
+    docker tag "${TEST_IMAGE_NAME}" "${dev_image}"
+    docker push "${dev_image}"
     if [[ ${GIT_BRANCH} == 'master' ]]; then
-        echo "tagging & pushing image -- ${DEV_IMAGE_REPO}:latest"
-        docker tag "${DEV_IMAGE_REPO}:${COMMIT_SHA}" "${DEV_IMAGE_REPO}:latest"
-        docker push "${DEV_IMAGE_REPO}:latest"
+        local latest_image="${DEV_IMAGE_REPO}:latest"
+        echo "tagging & pushing image -- ${latest_image}"
+        docker tag "${dev_image}" "${latest_image}"
+        docker push "${latest_image}"
     elif [[ ${GIT_BRANCH} =~ ${RELEASE_BRANCHES} ]]; then
-        echo "tagging & pushing image -- ${DEV_IMAGE_REPO}:${GIT_BRANCH}"
-        docker tag "${DEV_IMAGE_REPO}:${COMMIT_SHA}" "${DEV_IMAGE_REPO}:${GIT_BRANCH}"
-        docker push "${DEV_IMAGE_REPO}:${GIT_BRANCH}"
+        local branch_image="${DEV_IMAGE_REPO}:${GIT_BRANCH}"
+        echo "tagging & pushing image -- ${branch_image}"
+        docker tag "${dev_image}" "${branch_image}"
+        docker push "${branch_image}"
     fi
 }
 
@@ -67,28 +70,33 @@ e2e_tests() {
 }
 
 push_rc_image() {
+    local rc_image="${DEV_IMAGE_REPO}:${GIT_TAG}"
     if [[ "${CI}" == true ]]; then
-        echo "Tagging and pushing image -- ${DEV_IMAGE_REPO}:${GIT_TAG}"
+        echo "Tagging and pushing image -- ${rc_image}"
         docker pull "${DEV_IMAGE_REPO}:${COMMIT_SHA}"
-        docker tag "${DEV_IMAGE_REPO}:${COMMIT_SHA}" "${DEV_IMAGE_REPO}:${GIT_TAG}"
-        docker push "${DEV_IMAGE_REPO}:${GIT_TAG}"
+        docker tag "${DEV_IMAGE_REPO}:${COMMIT_SHA}" "${rc_image}"
+        docker push "${rc_image}"
     else
-        echo "CI=true must be set to push image -- ${DEV_IMAGE_REPO}:${GIT_TAG}"
+        echo "CI=true must be set to push image -- ${rc_image}"
     fi
 }
 
 push_prod_image() {
+    local prod_image="${PROD_IMAGE_REPO}:${GIT_TAG}"
     if [[ "${CI}" == true ]]; then
-        echo "Tagging and pushing image -- ${PROD_IMAGE_REPO}:${GIT_TAG}"
-        docker pull "${DEV_IMAGE_REPO}:${COMMIT_SHA}"
-        docker tag "${DEV_IMAGE_REPO}:${COMMIT_SHA}" "${PROD_IMAGE_REPO}:${GIT_TAG}"
-        docker push "${PROD_IMAGE_REPO}:${GIT_TAG}"
+        local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "*-rc*" --tags --abbrev=0)"
+        echo "Pulling RC image for release -- ${rc_image}"
+        docker pull "${rc_image}"
+        echo "Tagging and pushing image -- ${prod_image}"
+        docker tag "${rc_image}" "${prod_image}"
+        docker push "${prod_image}"
         if [[ ${GIT_BRANCH} = ${LATEST_RELEASE_BRANCH} ]]; then
-            echo "Tagging and pushing image -- ${PROD_IMAGE_REPO}:latest"
-            docker tag "${PROD_IMAGE_REPO}:${GIT_TAG}" "${PROD_IMAGE_REPO}:latest"
-            docker push "${PROD_IMAGE_REPO}:latest"
+            local latest_image="${PROD_IMAGE_REPO}:latest"
+            echo "Tagging and pushing image -- ${latest_image}"
+            docker tag "${prod_image}" "${latest_image}"
+            docker push "${latest_image}"
         fi
     else
-        echo "CI=true must be set to push image -- ${PROD_IMAGE_REPO}:${GIT_TAG}"
+        echo "CI=true must be set to push image -- ${prod_image}"
     fi
 }

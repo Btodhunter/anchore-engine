@@ -125,7 +125,7 @@ jobs:
           command: |
             rm -rf /home/circleci/workspace/caches/
             mkdir -p /home/circleci/workspace/caches/
-            docker save -o "/home/circleci/workspace/caches/${CIRCLE_SHA1}.tar" anchore-engine:test
+            docker save -o "/home/circleci/workspace/caches/${CIRCLE_SHA1}.tar" ${CIRCLE_PROJECT_REPONAME}:dev
       - persist_to_workspace:
           root: /home/circleci/workspace/
           paths:
@@ -207,14 +207,12 @@ workflows:
           filters: *filter_rc_tags
           requires:
             - push_rc_image
-          image_name: 'anchore/enterprise-dev:${CIRCLE_TAG}'
+          image_name: '${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}-dev:${CIRCLE_TAG}'
           private_registry: true
           timeout: '2000'
       - hold_for_approval:
           type: approval
           filters: *filter_semver_tags
-          requires:
-            - image_scan
       - push_image:
           name: push_prod_image
           make_job: push-prod
