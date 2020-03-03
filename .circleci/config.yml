@@ -23,6 +23,16 @@
     command: |
       docker load -i "/home/circleci/workspace/caches/${CIRCLE_SHA1}.tar" || true
 
+.ssh_forward_port: &ssh_forward_port
+  run:
+    name: Forward Anchore Engine api port
+    command: ssh -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
+
+.docker_login: &docker_login
+  run:
+    name: Login to DockerHub
+    command: echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
 .filter_rc_tags: &filter_rc_tags
   branches:
     ignore: /.*/
@@ -106,7 +116,6 @@ jobs:
       ANCHORE_TEST_DB_PASS: "postgres"
       ANCHORE_TEST_DATA_ENV_DIR: "test/data/test_data_env"
     steps:
-      - setup_remote_docker
       - checkout
       - run_tests:
           test_type: integration
@@ -142,9 +151,8 @@ jobs:
       - checkout
       - <<: *attach_workspace
       - <<: *load_docker_image
-      - run:
-          name: forward anchore-engine api port
-          command: ssh -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
+      - <<: *ssh_forward_port
+      - <<: *docker_login
       - run_tests:
           test_type: functional
 
@@ -157,12 +165,11 @@ jobs:
       - checkout
       - <<: *attach_workspace
       - <<: *load_docker_image
+      - <<: *ssh_forward_port
+      - <<: *docker_login
       - run:
           name: Run e2e tests
-          command: |
-            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-            ssh -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
-            make test-e2e
+          command: make test-e2e
 
   push_image:
     description: Uses make script to push images to DockerHub - dev, rc, prod
@@ -177,11 +184,10 @@ jobs:
       - checkout
       - <<: *attach_workspace
       - <<: *load_docker_image
+      - <<: *docker_login
       - run:
           name: Push to Dockerhub
-          command: |
-            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-            make << parameters.make_job >>
+          command: make << parameters.make_job >>
 
 workflows:
   default_workflow:
