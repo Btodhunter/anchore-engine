@@ -210,11 +210,12 @@ workflows:
           context: e2e-testing
           filters: *filter_release_branch
           requires:
-            - push_image
+            - push_dev_image
 
   rc_image_workflow:
     jobs:
       - e2e_tests:
+          name: rc_e2e_tests
           context: e2e-testing
           filters: *filter_rc_tags
       - push_image:
@@ -223,11 +224,12 @@ workflows:
           context: dockerhub
           filters: *filter_rc_tags
           requires:
-            - e2e_tests
+            - rc_e2e_tests
 
   prod_image_workflow:
     jobs:
       - e2e_tests:
+          name: prod_e2e_tests
           context: e2e-testing
           filters: *filter_semver_tags
           environment:
@@ -236,7 +238,7 @@ workflows:
           type: approval
           filters: *filter_semver_tags
           requires:
-            - e2e_tests
+            - prod_e2e_tests
       - push_image:
           name: push_prod_image
           make_job: push-prod
