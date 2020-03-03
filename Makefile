@@ -14,7 +14,8 @@ CI ?= false
 # Set SKIP_CLEANUP=true to prevent all exit cleanup tasks from running
 SKIP_CLEANUP ?= false
 # Use $CIRCLE_SHA if it's set, otherwise use SHA from HEAD
-COMMIT_SHA ?= $(shell echo $${CIRCLE_SHA:=$$(git rev-parse HEAD)})
+# COMMIT_SHA ?= $(shell echo $${CIRCLE_SHA:=$$(git rev-parse HEAD)})
+COMMIT_SHA=latest
 # Use $CIRCLE_PROJECT_REPONAME if it's set, otherwise the git project top level dir name
 GIT_REPO ?= $(shell echo $${CIRCLE_PROJECT_REPONAME:=$$(basename `git rev-parse --show-toplevel`)})
 # Use $CIRCLE_BRANCH if it's set, otherwise use current HEAD branch
