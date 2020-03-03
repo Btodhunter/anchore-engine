@@ -33,9 +33,9 @@ HELM_VERSION := v3.1.1
 RUN_COMMAND := scripts/ci/make_run_command
 PRINT := VERBOSE=false $(RUN_COMMAND) print
 ENV := /usr/bin/env
-VENV_NAME := venv
-VENV_ACTIVATE = $(VENV_NAME)/bin/activate
-PYTHON = $(VENV_NAME)/bin/python3
+VENV := venv
+VENV_ACTIVATE = $(VENV)/bin/activate
+PYTHON = $(VENV)/bin/python3
 PYTHON_VERSION := 3.6.6
 .DEFAULT_GOAL := help # Running `Make` will run the help target
 .NOTPARALLEL: # wait for targets to finish

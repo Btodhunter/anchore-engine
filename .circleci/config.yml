@@ -11,6 +11,7 @@
   PROD_IMAGE_REPO: "btodhunter/anchore-engine-dev"
   RELEASE_BRANCHES: "0.2 0.3 0.4 0.5 0.6"
   LATEST_RELEASE_BRANCH: "0.6"
+  VERBOSE: true
 
 .attach_workspace: &attach_workspace
   attach_workspace:
@@ -132,24 +133,32 @@ jobs:
             - caches/*
 
   functional_tests:
-    machine: true
+    docker:
+      - image: circleci/python:3.6
     environment: *global_environment_vars
     steps:
+      - setup_remote_docker
       - <<: *attach_workspace
       - <<: *load_docker_image
+      - run:
+          name: forward anchore-cli port
+          command: ssh  -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
       - run_tests:
           test_type: functional
 
   e2e_tests:
-    machine: true
+    docker:
+      - image: circleci/python:3.6
     environment: *global_environment_vars
     steps:
+      - setup_remote_docker
       - <<: *attach_workspace
       - <<: *load_docker_image
       - run:
           name: Run e2e tests
           command: |
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            ssh  -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
             make test-e2e
 
   push_image:

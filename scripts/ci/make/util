@@ -5,7 +5,7 @@
 #########################################################
 
 cleanup() {
-    rm -rf "${VENV_NAME}/tmp"
+    rm -rf "${VENV}/tmp"
 }
 
 clean_container() {
@@ -13,7 +13,7 @@ clean_container() {
 }
 
 clean_python_env() {
-    rm -rf "${VENV_NAME}" \
+    rm -rf "${VENV}" \
         *.egg-info \
         dist \
         build
@@ -44,27 +44,27 @@ install_dev() {
 
 install_cluster_deps() {
     local arch=$(uname | tr A-Z a-z)
-    if [[ ! -x ${VENV_NAME}/bin/kind ]]; then
+    if [[ ! -x ${VENV}/bin/kind ]]; then
         echo 'installing kind...'
-        curl -sSLo "${VENV_NAME}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
-        chmod +x "${VENV_NAME}/bin/kind"
+        curl -sSLo "${VENV}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
+        chmod +x "${VENV}/bin/kind"
     fi
-    if [[ ! -x "${VENV_NAME}/bin/helm" ]]; then
+    if [[ ! -x "${VENV}/bin/helm" ]]; then
         echo 'installing helm...'
-        curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-${arch}-amd64.tar.gz" | tar xzf - -C "${VENV_NAME}/bin" --strip-components=1 "${arch}-amd64/helm"
-        chmod +x "${VENV_NAME}/bin/helm"
+        curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-${arch}-amd64.tar.gz" | tar xzf - -C "${VENV}/bin" --strip-components=1 "${arch}-amd64/helm"
+        chmod +x "${VENV}/bin/helm"
     fi
-    if [[ ! -x "${VENV_NAME}/bin/kubectl" ]]; then
+    if [[ ! -x "${VENV}/bin/kubectl" ]]; then
         echo 'installing kubectl...'
-        curl -sSLo "${VENV_NAME}/bin/kubectl" "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/${arch}/amd64/kubectl"
-        chmod +x "${VENV_NAME}/bin/kubectl"
+        curl -sSLo "${VENV}/bin/kubectl" "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/${arch}/amd64/kubectl"
+        chmod +x "${VENV}/bin/kubectl"
     fi
 }
 
 install_testing_deps() {
     mkdir -p .tox
     for p in "$@"; do
-        if [[ ! "$(echo ${VENV_NAME}/bin/*)" =~ "$p" ]]; then
+        if [[ ! "$(echo ${VENV}/bin/*)" =~ "$p" ]]; then
             pip install "$p"
         fi
     done
@@ -135,9 +135,9 @@ setup_venv() {
         hash virtualenv || (printf "%s\n${ERR}ensure virtualenv is installed before attempting to setup a virtual environment${NC}\n" && exit 1)
     fi
     if [[ ! -x ${PYTHON} ]]; then
-        if ! virtualenv -p "${python_binary_name}" "${VENV_NAME}" && [[ "${CI}" == true ]]; then
+        if ! virtualenv -p "${python_binary_name}" "${VENV}" && [[ "${CI}" == true ]]; then
             setup_pyenv
-            virtualenv -p "${PYTHON##*/}" "${VENV_NAME}"
+            virtualenv -p "${PYTHON##*/}" "${VENV}"
         fi
     fi
 }
