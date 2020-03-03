@@ -24,7 +24,8 @@ GIT_BRANCH ?= $(shell echo $${CIRCLE_BRANCH:=$$(git rev-parse --abbrev-ref HEAD)
 CLI_COMMIT_SHA ?= $(shell echo $${ANCHORE_CLI_VERSION:=$$(git ls-remote git@github.com:anchore/anchore-cli.git --sort="version:refname" --tags v\* | tail -n1 | awk '{print $$1}')})
 
 # Testing environment configuration
-TEST_IMAGE_NAME = $(GIT_REPO):dev
+# TEST_IMAGE_NAME = $(GIT_REPO):dev
+TEST_IMAGE_NAME = anchore/anchore-engine-dev:latest
 KIND_VERSION := v0.7.0
 KIND_NODE_IMAGE_TAG := v1.15.7@sha256:e2df133f80ef633c53c0200114fce2ed5e1f6947477dbc83261a6a921169488d
 KUBECTL_VERSION := v1.15.0
