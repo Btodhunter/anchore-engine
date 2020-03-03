@@ -65,13 +65,13 @@ e2e_tests() {
     else
         local engine_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
     fi
-    install_testing_deps anchorecli
     # Install stable/anchore-engine Helm chart
     printf "%s\nInstalling stable/anchore-engine Helm chart...\n"
     helm install e2e-testing -f test/e2e/base-values.yaml --set anchoreEngineGlobal.image="${engine_image}" stable/anchore-engine | head -n6
     # Patch anchore-engine-api nodeport to the configured port thats mapped with kind to localhost:8228
     kubectl patch service e2e-testing-anchore-engine-api --type=json --patch '[{"op": "replace", "path": "/spec/ports/0/nodePort", "value":30028}]'
     # Run API endpoint health tests
+    install_testing_deps anchorecli
     anchore-cli --u admin --p foobar system wait --timeout 300 --interval 10 --feedsready '' --servicesready 'catalog,apiext,policy_engine,simplequeue,analyzer'
     anchore-cli --u admin --p foobar system status
 }
