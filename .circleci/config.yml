@@ -49,7 +49,7 @@ orbs:
 commands:
   run_tests:
     description: |
-      Uses make to run tests 
+      Uses make script to run tests 
       Saves the tox cache & stores log output as artifacts
     parameters:
       test_type:
@@ -124,12 +124,6 @@ jobs:
           name: Build Docker image
           command: make build
       - run:
-          name: Run compose tests
-          command: |
-            # forward port 8228 from remote-docker to runner
-            ssh -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
-            make test-compose
-      - run:
           name: Save image to workspace
           command: |
             rm -rf /home/circleci/workspace/caches/
@@ -149,21 +143,6 @@ jobs:
       - run_tests:
           test_type: "functional"
 
-  push_dev_image:
-    docker:
-      - image: circleci/python:3.6
-    environment: *global_environment_vars
-    steps:
-      - setup_remote_docker
-      - checkout
-      - <<: *attach_workspace
-      - <<: *load_docker_image
-      - run:
-          name: Push to Dockerhub
-          command: |
-            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-            make push-dev
-
   e2e_tests:
     machine: true
     environment: *global_environment_vars
@@ -176,6 +155,25 @@ jobs:
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
             make test-e2e
 
+  push_image:
+    description: Uses make script to push images to DockerHub - dev, rc, prod
+    parameters:
+      make_recipe:
+        type: string
+    docker:
+      - image: circleci/python:3.6
+    environment: *global_environment_vars
+    steps:
+      - setup_remote_docker
+      - checkout
+      - <<: *attach_workspace
+      - <<: *load_docker_image
+      - run:
+          name: Push to Dockerhub
+          command: |
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+            make << parameters.make_recipe >>
+
 workflows:
   default_workflow:
     jobs:
@@ -186,7 +184,9 @@ workflows:
       - functional_tests:
           requires:
             - build
-      - push_dev_image:
+      - push_image:
+          name: push_dev_image
+          make_recipe: push
           context: dockerhub
           filters: *filter_release_branch
           requires:
@@ -198,7 +198,9 @@ workflows:
           filters: *filter_release_branch
           requires:
             - push_dev_image
-      - push_rc_image:
+      - push_image:
+          name: push_rc_image
+          make_recipe: push-rc
           context: dockerhub
           filters: *filter_rc_tags
           requires:
@@ -216,7 +218,9 @@ workflows:
           filters: *filter_semver_tags
           requires:
             - e2e_tests
-      - push_prod_image:
+      - push_image:
+          name: push_prod_image
+          make_recipe: push-prod
           context: dockerhub-prod
           filters: *filter_semver_tags
           requires:
