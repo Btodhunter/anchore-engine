@@ -25,8 +25,10 @@
 
 .ssh_forward_port: &ssh_forward_port
   run:
-    name: Forward Anchore Engine api port
-    command: ssh -MS anchore -fN4 -L 8228:localhost:8228 remote-docker
+    name: Forward remote-docker ports for testing
+    command: |
+      ssh -MS anchore-api -fN4 -L 8228:localhost:8228 remote-docker
+      ssh -MS k8s-api -fN4 -L 32768:localhost:32768 remote-docker
 
 .docker_login: &docker_login
   run:
@@ -199,7 +201,7 @@ workflows:
             - build
       - push_image:
           name: push_dev_image
-          make_job: push
+          make_job: push-dev
           context: dockerhub
           filters: *filter_release_branch
           requires:
