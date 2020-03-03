@@ -47,6 +47,8 @@
       - /^[0-9]+(\.[0-9]+)$/
       - master
       - /^ci-.*/
+  tags:
+    only: /^v[0-9]+(\.[0-9]+)*-rc[0-9]+$/
 
 .filter_semver_tags: &filter_semver_tags
   branches:
