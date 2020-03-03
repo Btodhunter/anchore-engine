@@ -43,20 +43,20 @@ install_dev() {
 }
 
 install_cluster_deps() {
-    ARCH=$(uname | tr A-Z a-z)
+    local arch=$(uname | tr A-Z a-z)
     if [[ ! -x ${VENV_NAME}/bin/kind ]]; then
         echo 'installing kind...'
-        curl -sSLo "${VENV_NAME}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${ARCH}-amd64"
+        curl -sSLo "${VENV_NAME}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
         chmod +x "${VENV_NAME}/bin/kind"
     fi
     if [[ ! -x "${VENV_NAME}/bin/helm" ]]; then
         echo 'installing helm...'
-        curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-${ARCH}-amd64.tar.gz" | tar xzf - -C "${VENV_NAME}/bin" --strip-components=1 "${ARCH}-amd64/helm"
+        curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-${arch}-amd64.tar.gz" | tar xzf - -C "${VENV_NAME}/bin" --strip-components=1 "${arch}-amd64/helm"
         chmod +x "${VENV_NAME}/bin/helm"
     fi
     if [[ ! -x "${VENV_NAME}/bin/kubectl" ]]; then
         echo 'installing kubectl...'
-        curl -sSLo "${VENV_NAME}/bin/kubectl" "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/${ARCH}/amd64/kubectl"
+        curl -sSLo "${VENV_NAME}/bin/kubectl" "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/${arch}/amd64/kubectl"
         chmod +x "${VENV_NAME}/bin/kubectl"
     fi
 }
@@ -94,8 +94,9 @@ setup_colors() {
 }
 
 setup_pyenv() {
+    local python_binary_name="${PYTHON##*/}"
     # install and configure pyenv
-    if [[ ! -f "${HOME}"/.pyenv/bin/pyenv ]]; then
+    if [[ -z "${PYENV_ROOT}" ]] || [[ ! -d "${HOME}"/.pyenv ]]; then
         curl https://pyenv.run | "${SHELL}"
         echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> "${HOME}/.bashrc"
         echo 'eval "$(pyenv init -)"' >> "${HOME}/.bashrc"
@@ -109,7 +110,7 @@ setup_pyenv() {
         fi
         printf "%s\n\t${INFO}To enable pyenv in your current shell run:\n\t\t${WARN}exec ${SHELL}${NC}\n\n"
     fi
-    if [[ ! -f "${HOME}"/.pyenv/versions/"${PYTHON_VERSION}"/bin/python ]]; then
+    if [[ ! -f "${HOME}"/.pyenv/versions/"${PYTHON_VERSION}"/bin/"${python_binary_name}" ]]; then
         "${HOME}"/.pyenv/bin/pyenv install "${PYTHON_VERSION}"
     fi
     # set local pyenv version
@@ -117,6 +118,7 @@ setup_pyenv() {
 }
 
 setup_venv() {
+    local python_binary_name="${PYTHON##*/}"
     if [[ ${CI} == true ]]; then
         hash pip || apt install python-pip
         hash virtualenv || pip install virtualenv
@@ -125,9 +127,9 @@ setup_venv() {
         hash virtualenv || (printf "%s\n${ERR}ensure virtualenv is installed before attempting to setup a virtual environment${NC}\n" && exit 1)
     fi
     if [[ ! -x ${PYTHON} ]]; then
-        if ! virtualenv -p python3 "${VENV_NAME}" && [[ "${CI}" == true ]]; then
+        if ! virtualenv -p "${python_binary_name}" "${VENV_NAME}" && [[ "${CI}" == true ]]; then
             setup_pyenv
-            virtualenv -p python3 "${VENV_NAME}"
+            virtualenv -p "${PYTHON##*/}" "${VENV_NAME}"
         fi
     fi
 }
