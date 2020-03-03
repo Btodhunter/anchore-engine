@@ -1,5 +1,5 @@
 # Variables set in CircleCI - do not set locally to prevent any accidental pushes to Dockerhub
-DEV_IMAGE_REPO ?= anchore/anchore-engine-dev
+DEV_IMAGE_REPO ?= btodhunter/anchore-engine-dev
 PROD_IMAGE_REPO ?=
 RELEASE_BRANCHES ?=
 LATEST_RELEASE_BRANCH ?=
@@ -46,8 +46,12 @@ PYTHON_VERSION := 3.6.6
 build: Dockerfile ## build dev image
 	@$(RUN_COMMAND) build
 
-.PHONY: push
-push: ## push dev image to dockerhub
+.PHONY: ci ## run full ci pipeline locally
+ci: test-unit test-integration build test-functional test-e2e push
+
+.PHONY: push push-dev
+push: push-dev ## push dev image to dockerhub
+push-dev:
 	@$(RUN_COMMAND) push_dev_image
 
 .PHONY: push-rc
@@ -71,39 +75,33 @@ install: venv setup.py requirements.txt ## install project to venv
 install-dev: venv setup.py requirements.txt ## install project to venv in editable mode
 	@$(RUN_COMMAND) install_dev
 
-.PHONY: deps
-deps: venv ## install testing dependencies
-	@$(RUN_COMMAND) install_testing_deps
-
 .PHONY: compose-up
-compose-up: deps scripts/ci/docker-compose-ci.yaml ## run docker compose with dev image
+compose-up: venv scripts/ci/docker-compose-ci.yaml ## run docker compose with dev image
 	@$(RUN_COMMAND) docker_compose_up
 
 .PHONY: compose-down
-compose-down: deps scripts/ci/docker-compose-ci.yaml ## stop docker-compose
+compose-down: venv scripts/ci/docker-compose-ci.yaml ## stop docker-compose
 	@$(RUN_COMMAND) docker_compose_down
 
 .PHONY: cluster-up
-cluster-up: deps test/e2e/kind-config.yaml ## setup kind testing cluster
+cluster-up: venv test/e2e/kind-config.yaml ## setup kind testing cluster
 	@$(RUN_COMMAND) kind_cluster_up
 
 .PHONY: cluster-down
-cluster-down: deps ## delete kind testing cluster
+cluster-down: venv ## delete kind testing cluster
 	@$(RUN_COMMAND) kind_cluster_down
 
 .PHONY: lint
 lint: venv ## lint code using pylint
 	@$(RUN_COMMAND) lint
 
-.PHONY: test
-test-all: test-unit test-integration test-functional test-e2e ## run all tests - unit, integration, functional, e2e
-
-.PHONY: test-unit
-test-unit: deps ## run unit tests using tox
+.PHONY: test test-unit
+test: test-unit ## run unit tests using tox
+test-unit: venv
 	@$(RUN_COMMAND) unit_tests
 
 .PHONY: test-integration
-test-integration: deps ## run integration tests using tox
+test-integration: venv ## run integration tests using tox
 	@$(RUN_COMMAND) integration_tests
 
 .PHONY: test-functional
@@ -132,17 +130,13 @@ clean-container: ## delete dev image
 	@$(RUN_COMMAND) clean_container
 
 .PHONY: setup-dev
-setup-dev: setup-pyenv deps install-dev ## setup dev environment - install pyenv, python, deps, project
+setup-dev: setup-pyenv venv install-dev ## setup dev environment - install pyenv, python, venv, project
 	@printf "\n\tEnable virtualenv by running:\n\t\tsource $(VENV_ACTIVATE)\n"
 
 .PHONY: setup-pyenv
-setup-pyenv: | .python-version ## install pyenv, python and set local .python_version
-.python-version: | $(HOME)/.pyenv/versions/$(PYTHON_VERSION)/bin/python
-	@$(RUN_COMMAND) set_pyenv_local_version
-$(HOME)/.pyenv/versions/$(PYTHON_VERSION)/bin/python: | $(HOME)/.pyenv/bin/pyenv
-	@$(RUN_COMMAND) install_python_version
-$(HOME)/.pyenv/bin/pyenv:
-	@$(RUN_COMMAND) install_pyenv
+setup-pyenv: .python-version ## install pyenv, python and set local .python_version
+.python-version:
+	@$(RUN_COMMAND) setup_pyenv
 
 .PHONY: printvars
 printvars: ## print configured make environment vars

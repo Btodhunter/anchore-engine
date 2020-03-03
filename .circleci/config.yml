@@ -11,7 +11,6 @@
   PROD_IMAGE_REPO: "btodhunter/anchore-engine-dev"
   RELEASE_BRANCHES: "0.2 0.3 0.4 0.5 0.6"
   LATEST_RELEASE_BRANCH: "0.6"
-  VERBOSE: "2"
 
 .attach_workspace: &attach_workspace
   attach_workspace:
@@ -66,8 +65,6 @@ commands:
           paths:
             - ~/project/.tox
           key: v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
-      - store_artifacts:
-          path: .tox/tox.log
       - store_test_results:
           path: .tox/results
 
@@ -78,7 +75,7 @@ jobs:
     environment: *global_environment_vars
     steps:
       - run_tests:
-          test_type: "unit"
+          test_type: unit
 
   integration_tests:
     docker:
@@ -110,7 +107,7 @@ jobs:
     steps:
       - setup_remote_docker
       - run_tests:
-          test_type: "integration"
+          test_type: integration
 
   build:
     docker:
@@ -141,7 +138,7 @@ jobs:
       - <<: *attach_workspace
       - <<: *load_docker_image
       - run_tests:
-          test_type: "functional"
+          test_type: functional
 
   e2e_tests:
     machine: true
@@ -158,7 +155,7 @@ jobs:
   push_image:
     description: Uses make script to push images to DockerHub - dev, rc, prod
     parameters:
-      make_recipe:
+      make_job:
         type: string
     docker:
       - image: circleci/python:3.6
@@ -172,21 +169,20 @@ jobs:
           name: Push to Dockerhub
           command: |
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-            make << parameters.make_recipe >>
+            make << parameters.make_job >>
 
 workflows:
   default_workflow:
     jobs:
       - unit_tests
       - integration_tests
-      - build:
-          context: aws-prod
+      - build
       - functional_tests:
           requires:
             - build
       - push_image:
           name: push_dev_image
-          make_recipe: push
+          make_job: push
           context: dockerhub
           filters: *filter_release_branch
           requires:
@@ -200,12 +196,13 @@ workflows:
             - push_dev_image
       - push_image:
           name: push_rc_image
-          make_recipe: push-rc
+          make_job: push-rc
           context: dockerhub
           filters: *filter_rc_tags
           requires:
             - e2e_tests
       - anchore/image_scan:
+          name: image_scan
           context: dockerhub
           filters: *filter_rc_tags
           requires:
@@ -217,10 +214,10 @@ workflows:
           type: approval
           filters: *filter_semver_tags
           requires:
-            - e2e_tests
+            - image_scan
       - push_image:
           name: push_prod_image
-          make_recipe: push-prod
+          make_job: push-prod
           context: dockerhub-prod
           filters: *filter_semver_tags
           requires:

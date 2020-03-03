@@ -27,11 +27,11 @@ clean_tests() {
 }
 
 docker_compose_down() {
-    docker-compose -f scripts/ci/docker-compose-ci.yaml down 2>&1
+    docker-compose -f scripts/ci/docker-compose-ci.yaml down
 }
 
 docker_compose_up() {
-    docker-compose -f scripts/ci/docker-compose-ci.yaml up -d 2>&1
+    docker-compose -f scripts/ci/docker-compose-ci.yaml up -d
 }
 
 install() {
@@ -42,34 +42,7 @@ install_dev() {
     pip install --editable .
 }
 
-install_pyenv() {
-    curl https://pyenv.run | "${SHELL}"
-    echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> "${HOME}/.bashrc"
-    echo 'eval "$(pyenv init -)"' >> "${HOME}/.bashrc"
-    echo 'eval "$(pyenv virtualenv-init -)"' >> "${HOME}/.bashrc"
-    chmod +x "${HOME}/.bashrc"
-    printf "%s\t\n${INFO}added pyenv config to ${HOME}/.bashrc${NC}\n"
-    if [[ -f "${HOME}/.zshrc" ]]; then
-        echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.zshrc"
-    elif [[ -f "${HOME}/.bash_profile" ]]; then
-        echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.bash_profile"
-    fi
-    printf "%s\n\t${INFO}To enable pyenv in your current shell run:\n\t\t${WARN}exec ${SHELL}${NC}\n\n"
-}
-
-install_python_version() {
-    "${HOME}"/.pyenv/bin/pyenv install "${PYTHON_VERSION}"
-}
-
-install_testing_deps() {
-    mkdir -p .tox
-    local pip_packages=('tox' 'docker-compose' 'anchorecli')
-    for p in "${pip_packages[@]}"; do
-        if [[ ! "$(echo ${VENV_NAME}/bin/*)" =~ "$p" ]]; then
-            pip install "$p"
-        fi
-    done
-
+install_cluster_deps() {
     ARCH=$(uname | tr A-Z a-z)
     if [[ ! -x ${VENV_NAME}/bin/kind ]]; then
         echo 'installing kind...'
@@ -88,16 +61,28 @@ install_testing_deps() {
     fi
 }
 
+install_testing_deps() {
+    mkdir -p .tox
+    for p in "$@"; do
+        if [[ ! "$(echo ${VENV_NAME}/bin/*)" =~ "$p" ]]; then
+            pip install "$p"
+        fi
+    done
+}
+
 kind_cluster_down() {
+    install_cluster_deps
     kind delete cluster --name e2e-testing
 }
 
 kind_cluster_up() {
+    install_cluster_deps
     kind create cluster --name e2e-testing --config test/e2e/kind-config.yaml --image "kindest/node:${KIND_NODE_IMAGE_TAG}" --wait 60s
     if [[ "$CI" == true ]]; then
         kubectl create secret docker-registry anchore-enterprise-pullcreds --docker-server=docker.io --docker-username="${DOCKER_USER}" --docker-password="${DOCKER_PASS}" --docker-email=anchoreci@anchore.com
         kubectl patch serviceaccount default --type=merge --patch '{"imagePullSecrets":[{"name": "anchore-enterprise-pullcreds"}]}'
     fi
+    helm repo add stable https://kubernetes-charts.storage.googleapis.com
 }
 
 setup_colors() {
@@ -106,6 +91,29 @@ setup_colors() {
     INFO="\033[0;36m"
     ERR="\033[0;31m"
     NC="\033[0m"
+}
+
+setup_pyenv() {
+    # install and configure pyenv
+    if [[ ! -f "${HOME}"/.pyenv/bin/pyenv ]]; then
+        curl https://pyenv.run | "${SHELL}"
+        echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> "${HOME}/.bashrc"
+        echo 'eval "$(pyenv init -)"' >> "${HOME}/.bashrc"
+        echo 'eval "$(pyenv virtualenv-init -)"' >> "${HOME}/.bashrc"
+        chmod +x "${HOME}/.bashrc"
+        printf "%s\t\n${INFO}added pyenv config to ${HOME}/.bashrc${NC}\n"
+        if [[ -f "${HOME}/.zshrc" ]]; then
+            echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.zshrc"
+        elif [[ -f "${HOME}/.bash_profile" ]]; then
+            echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.bash_profile"
+        fi
+        printf "%s\n\t${INFO}To enable pyenv in your current shell run:\n\t\t${WARN}exec ${SHELL}${NC}\n\n"
+    fi
+    if [[ ! -f "${HOME}"/.pyenv/versions/"${PYTHON_VERSION}"/bin/python ]]; then
+        "${HOME}"/.pyenv/bin/pyenv install "${PYTHON_VERSION}"
+    fi
+    # set local pyenv version
+    "${HOME}"/.pyenv/bin/pyenv local "${PYTHON_VERSION}"
 }
 
 setup_venv() {
@@ -117,8 +125,4 @@ setup_venv() {
         hash virtualenv || (printf "%s\n${ERR}ensure virtualenv is installed before attempting to setup a virtual environment${NC}\n" && exit 1)
     fi
     test -f "${PYTHON}" || virtualenv -p python3 "${VENV_NAME}"
-}
-
-set_pyenv_local_version() {
-    "${HOME}"/.pyenv/bin/pyenv local "${PYTHON_VERSION}"
 }

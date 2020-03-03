@@ -22,10 +22,9 @@ trap_command() {
 }
 
 main() {
-    local COMMAND="$1"
-    local MESSAGE="$2"
+    local COMMAND="$@"
 
-    # load libraries
+    # load all libraries from the 'scripts/ci/make' directory.
     for f in "$(cd "$(dirname ${BASH_SOURCE[0]})" && pwd)"/make/*; do
         . "$f"
     done
