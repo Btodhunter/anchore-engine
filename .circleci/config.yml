@@ -162,7 +162,7 @@ jobs:
           name: Push to Dockerhub
           command: |
             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-            make push
+            make push-dev
 
   e2e_tests:
     machine: true

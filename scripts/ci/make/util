@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+#########################################################
+###   COMMON UTILITY FUNCTIONS - ALPHABETICAL ORDER   ###
+#########################################################
+
+cleanup() {
+    rm -rf "${VENV_NAME}/tmp"
+}
+
+clean_container() {
+    docker rmi "${TEST_IMAGE_NAME}"
+}
+
+clean_python_env() {
+    rm -rf "${VENV_NAME}" \
+        *.egg-info \
+        dist \
+        build
+    find . -name '*.pyc' -exec rm -f {} \;
+}
+
+clean_tests() {
+    rm -rf .tox
+    rm -f tox.log
+    rm -rf .pytest_cache
+}
+
+docker_compose_down() {
+    docker-compose -f scripts/ci/docker-compose-ci.yaml down 2>&1
+}
+
+docker_compose_up() {
+    docker-compose -f scripts/ci/docker-compose-ci.yaml up -d 2>&1
+}
+
+install() {
+    pip install .
+}
+
+install_dev() {
+    pip install --editable .
+}
+
+install_pyenv() {
+    curl https://pyenv.run | "${SHELL}"
+    echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> "${HOME}/.bashrc"
+    echo 'eval "$(pyenv init -)"' >> "${HOME}/.bashrc"
+    echo 'eval "$(pyenv virtualenv-init -)"' >> "${HOME}/.bashrc"
+    chmod +x "${HOME}/.bashrc"
+    printf "%s\t\n${INFO}added pyenv config to ${HOME}/.bashrc${NC}\n"
+    if [[ -f "${HOME}/.zshrc" ]]; then
+        echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.zshrc"
+    elif [[ -f "${HOME}/.bash_profile" ]]; then
+        echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.bash_profile"
+    fi
+    printf "%s\n\t${INFO}To enable pyenv in your current shell run:\n\t\t${WARN}exec ${SHELL}${NC}\n\n"
+}
+
+install_python_version() {
+    "${HOME}"/.pyenv/bin/pyenv install "${PYTHON_VERSION}"
+}
+
+install_testing_deps() {
+    mkdir -p .tox
+    local pip_packages=('tox' 'docker-compose' 'anchorecli')
+    for p in "${pip_packages[@]}"; do
+        if [[ ! "$(echo ${VENV_NAME}/bin/*)" =~ "$p" ]]; then
+            pip install "$p"
+        fi
+    done
+
+    ARCH=$(uname | tr A-Z a-z)
+    if [[ ! -x ${VENV_NAME}/bin/kind ]]; then
+        echo 'installing kind...'
+        curl -sSLo "${VENV_NAME}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${ARCH}-amd64"
+        chmod +x "${VENV_NAME}/bin/kind"
+    fi
+    if [[ ! -x "${VENV_NAME}/bin/helm" ]]; then
+        echo 'installing helm...'
+        curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-${ARCH}-amd64.tar.gz" | tar xzf - -C "${VENV_NAME}/bin" --strip-components=1 "${ARCH}-amd64/helm"
+        chmod +x "${VENV_NAME}/bin/helm"
+    fi
+    if [[ ! -x "${VENV_NAME}/bin/kubectl" ]]; then
+        echo 'installing kubectl...'
+        curl -sSLo "${VENV_NAME}/bin/kubectl" "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/${ARCH}/amd64/kubectl"
+        chmod +x "${VENV_NAME}/bin/kubectl"
+    fi
+}
+
+kind_cluster_down() {
+    kind delete cluster --name e2e-testing
+}
+
+kind_cluster_up() {
+    kind create cluster --name e2e-testing --config test/e2e/kind-config.yaml --image "kindest/node:${KIND_NODE_IMAGE_TAG}" --wait 60s
+    if [[ "$CI" == true ]]; then
+        kubectl create secret docker-registry anchore-enterprise-pullcreds --docker-server=docker.io --docker-username="${DOCKER_USER}" --docker-password="${DOCKER_PASS}" --docker-email=anchoreci@anchore.com
+        kubectl patch serviceaccount default --type=merge --patch '{"imagePullSecrets":[{"name": "anchore-enterprise-pullcreds"}]}'
+    fi
+}
+
+setup_colors() {
+    OK="\033[0;32m"
+    WARN="\033[0;33m"
+    INFO="\033[0;36m"
+    ERR="\033[0;31m"
+    NC="\033[0m"
+}
+
+setup_venv() {
+    if [[ ${CI} == true ]]; then
+        hash pip || apt install python-pip
+        hash virtualenv || pip install virtualenv
+    else
+        hash pip || (printf "%s\n${ERR}ensure python-pip is installed before attempting to setup virtualenv${NC}\n" && exit 1)
+        hash virtualenv || (printf "%s\n${ERR}ensure virtualenv is installed before attempting to setup a virtual environment${NC}\n" && exit 1)
+    fi
+    test -f "${PYTHON}" || virtualenv -p python3 "${VENV_NAME}"
+}
+
+set_pyenv_local_version() {
+    "${HOME}"/.pyenv/bin/pyenv local "${PYTHON_VERSION}"
+}
