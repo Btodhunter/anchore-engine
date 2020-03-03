@@ -5,8 +5,11 @@
 ######################################################
 
 build() {
-    docker build --target anchore-engine-builder -t "${GIT_REPO}:builder" -f ./Dockerfile .
-    docker build --build-arg ANCHORE_COMMIT="${COMMIT_SHA}" --build-arg CLI_COMMIT="${CLI_COMMIT_SHA}" -t "${TEST_IMAGE_NAME}" -f ./Dockerfile .
+    if [[ -n "${GIT_TAG}" ]]; then
+        local no_build_cache="--no-cache"
+    fi
+    docker build --target anchore-engine-builder ${no_build_cache} -t "${GIT_REPO}:builder" -f ./Dockerfile .
+    docker build --build-arg ANCHORE_COMMIT="${COMMIT_SHA}" ${no_build_cache} --build-arg CLI_COMMIT="${CLI_COMMIT_SHA}" -t "${TEST_IMAGE_NAME}" -f ./Dockerfile .
 }
 
 lint() {
@@ -83,8 +86,8 @@ push_rc_image() {
 
 push_prod_image() {
     local prod_image="${PROD_IMAGE_REPO}:${GIT_TAG}"
+    local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "*-rc*" --tags --abbrev=0)"
     if [[ "${CI}" == true ]]; then
-        local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "*-rc*" --tags --abbrev=0)"
         echo "Pulling RC image for release -- ${rc_image}"
         docker pull "${rc_image}"
         echo "Tagging and pushing image -- ${prod_image}"

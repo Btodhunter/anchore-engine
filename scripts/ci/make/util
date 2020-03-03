@@ -96,7 +96,7 @@ setup_colors() {
 setup_pyenv() {
     local python_binary_name="${PYTHON##*/}"
     # install and configure pyenv
-    if [[ -z "${PYENV_ROOT}" ]] || [[ ! -d "${HOME}"/.pyenv ]]; then
+    if [[ -z "${PYENV_ROOT}" ]] && [[ ! -d "${HOME}"/.pyenv ]]; then
         curl https://pyenv.run | "${SHELL}"
         echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> "${HOME}/.bashrc"
         echo 'eval "$(pyenv init -)"' >> "${HOME}/.bashrc"

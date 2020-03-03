@@ -6,6 +6,7 @@ LATEST_RELEASE_BRANCH ?=
 ANCHORE_CLI_VERSION ?=
 DOCKER_USER ?=
 DOCKER_PASS ?=
+GIT_TAG ?=
 # Set CI=true when running in CircleCI. This setting will setup the proper env for CircleCI
 # All production & RC image push jobs to Dockerhub are gated on CI=true
 CI ?= false
@@ -17,8 +18,6 @@ COMMIT_SHA ?= $(shell echo $${CIRCLE_SHA:=$$(git rev-parse HEAD)})
 GIT_REPO ?= $(shell echo $${CIRCLE_PROJECT_REPONAME:=$$(basename `git rev-parse --show-toplevel`)})
 # Use $CIRCLE_BRANCH if it's set, otherwise use current HEAD branch
 GIT_BRANCH ?= $(shell echo $${CIRCLE_BRANCH:=$$(git rev-parse --abbrev-ref HEAD)})
-# Use $CIRCLE_TAG if it's set, otherwise set to latest tag
-GIT_TAG ?= $(shell echo $${CIRCLE_TAG:=git describe --abbrev=0 --tags})
 # Use $ANCHORE_CLI_VERSION if it's set, otherwise get commit SHA of the latest anchore-cli tag
 CLI_COMMIT_SHA ?= $(shell echo $${ANCHORE_CLI_VERSION:=$$(git ls-remote git@github.com:anchore/anchore-cli.git --sort="version:refname" --tags v\* | tail -n1 | awk '{print $$1}')})
 
@@ -45,6 +44,7 @@ PYTHON_VERSION := 3.6.6
 .PHONY: build
 build: Dockerfile ## build dev image
 	@$(RUN_COMMAND) build
+	@printf "%s\n\tsuccessfully built image -- $(TEST_IMAGE_NAME)\n"
 
 .PHONY: ci ## run full ci pipeline locally
 ci: test-unit test-integration build test-functional test-e2e push
