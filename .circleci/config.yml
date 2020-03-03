@@ -55,7 +55,6 @@ commands:
       test_type:
         type: string
     steps:
-      - checkout
       - restore_cache:
           keys:
             - v1-dependencies-{{ .Branch }}-{{ checksum "requirements.txt" }}
@@ -75,6 +74,7 @@ jobs:
       - image: circleci/python:3.6
     environment: *global_environment_vars
     steps:
+      - checkout
       - run_tests:
           test_type: unit
 
@@ -107,6 +107,7 @@ jobs:
       ANCHORE_TEST_DATA_ENV_DIR: "test/data/test_data_env"
     steps:
       - setup_remote_docker
+      - checkout
       - run_tests:
           test_type: integration
 
@@ -138,6 +139,7 @@ jobs:
     environment: *global_environment_vars
     steps:
       - setup_remote_docker
+      - checkout
       - <<: *attach_workspace
       - <<: *load_docker_image
       - run:
@@ -152,6 +154,7 @@ jobs:
     environment: *global_environment_vars
     steps:
       - setup_remote_docker
+      - checkout
       - <<: *attach_workspace
       - <<: *load_docker_image
       - run:
