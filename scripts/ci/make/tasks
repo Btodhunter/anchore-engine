@@ -80,7 +80,7 @@ e2e_tests() {
     helm install "${helm_deploy_name}" -f test/e2e/base-values.yaml --set anchoreEngineGlobal.image="${engine_image}" stable/anchore-engine | head -n6
 
     # Patch anchore-engine-api nodeport to the configured port thats mapped with kind to localhost:8228
-    kubectl patch service "${helm_deploy_name}"-anchore-engine-api --type=json --patch '[{"op": "replace", "path": "/spec/ports/0/nodePort", "value":30028}]'
+    kubectl patch service "${helm_deploy_name}-anchore-engine-api" --type=json --patch '[{"op": "replace", "path": "/spec/ports/0/nodePort", "value":30028}]'
 
     install_testing_deps anchorecli
     anchore-cli --u admin --p foobar system wait --timeout 300 --interval 10 --feedsready '' --servicesready 'catalog,apiext,policy_engine,simplequeue,analyzer'
