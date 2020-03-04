@@ -265,7 +265,7 @@ workflows:
       - build:
           filters: *filter_rebuild_tags
       - push_image:
-          name: push-dev_image
+          name: push_dev_image
           make_job: push-dev
           context: dockerhub
           filters: *filter_rebuild_tags
