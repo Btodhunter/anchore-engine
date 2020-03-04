@@ -17,20 +17,20 @@ build() {
 
 lint() {
     install_testing_deps pylint
-    color_print WARN "linting project..."
+    color_print WARN "linting project"
     pylint anchore_engine
     pylint anchore_manager
 }
 
 unit_tests() {
-    color_print WARN "running unit tests..."
     install_testing_deps tox
+    color_print WARN "running unit tests"
     tox test/unit
 }
 
 integration_tests() {
-    color_print WARN "running integration tests..."
     install_testing_deps tox
+    color_print WARN "running integration tests"
     if [[ "${CI}" == true ]]; then
         tox test/integration
     else
@@ -39,8 +39,8 @@ integration_tests() {
 }
 
 functional_tests() {
-    color_print WARN "running functaional tests..."
     install_testing_deps anchorecli docker-compose tox
+    color_print WARN "running functaional tests"
     anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system wait --feedsready ''
     anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system status
     tox test/functional
@@ -83,6 +83,7 @@ e2e_tests() {
 
     install_testing_deps anchorecli
     anchore-cli --u admin --p foobar system wait --timeout 300 --interval 10 --feedsready '' --servicesready 'catalog,apiext,policy_engine,simplequeue,analyzer'
+    anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system status
     python scripts/tests/aetest.py docker.io/alpine:latest
     python scripts/tests/aefailtest.py docker.io/alpine:latest
 }

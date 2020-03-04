@@ -9,13 +9,14 @@ cleanup() {
 }
 
 clean_container() {
-    color_print ERROR "deleting ${TEST_IMAGE_NAME}..."
+    color_print ERROR "deleting ${TEST_IMAGE_NAME}"
     sleep 3
     docker rmi "${TEST_IMAGE_NAME}"
 }
 
 clean_python_env() {
-    color_print ERROR "deleting virtualenv & build data..."
+    color_print ERROR "deleting virtualenv & build data"
+    sleep 3
     rm -rf "${VENV}" \
         *.egg-info \
         dist \
@@ -24,7 +25,8 @@ clean_python_env() {
 }
 
 clean_tests() {
-    color_print ERROR "deleting testing temp data..."
+    color_print ERROR "deleting testing temp data"
+    sleep 3
     rm -rf .tox
     rm -f tox.log
     rm -rf .pytest_cache
@@ -52,17 +54,17 @@ install_cluster_deps() {
     local arch=$(uname | tr A-Z a-z)
 
     if [[ ! -x "${VENV}/bin/kind" ]]; then
-        color_print WARN "installing kind..."
+        color_print WARN "installing kind"
         curl -qsSLo "${VENV}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
         chmod +x "${VENV}/bin/kind"
     fi
     if [[ ! -x "${VENV}/bin/helm" ]]; then
-        color_print WARN "installing helm..."
+        color_print WARN "installing helm"
         curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-${arch}-amd64.tar.gz" | tar xzf - -C "${VENV}/bin" --strip-components=1 "${arch}-amd64/helm"
         chmod +x "${VENV}/bin/helm"
     fi
     if [[ ! -x "${VENV}/bin/kubectl" ]]; then
-        color_print WARN "installing kubectl..."
+        color_print WARN "installing kubectl"
         curl -sSLo "${VENV}/bin/kubectl" "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/${arch}/amd64/kubectl"
         chmod +x "${VENV}/bin/kubectl"
     fi
