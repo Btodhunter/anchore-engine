@@ -44,6 +44,7 @@ install_dev() {
 
 install_cluster_deps() {
     local arch=$(uname | tr A-Z a-z)
+
     if [[ ! -x "${VENV}/bin/kind" ]]; then
         printf "\n${WARN}%s${NC}\n" "installing kind..."
         curl -sSLo "${VENV}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
@@ -79,6 +80,7 @@ kind_cluster_up() {
     install_cluster_deps
     kind create cluster --name e2e-testing --config test/e2e/kind-config.yaml --image "kindest/node:${KIND_NODE_IMAGE_TAG}" --wait 60s
     if [[ "$CI" == true ]]; then
+        # create k8s secret using $DOCKER_USER & $DOCKER_PASS and set as default imagePullCreds
         kubectl create secret docker-registry anchore-enterprise-pullcreds --docker-server=docker.io --docker-username="${DOCKER_USER}" --docker-password="${DOCKER_PASS}" --docker-email=anchoreci@anchore.com
         kubectl patch serviceaccount default --type=merge --patch '{"imagePullSecrets":[{"name": "anchore-enterprise-pullcreds"}]}'
     fi
@@ -100,10 +102,11 @@ setup_colors() {
 
 setup_pyenv() {
     local python_binary_name="${PYTHON##*/}"
-    # install and configure pyenv
+
     if [[ -z "${PYENV_ROOT}" ]]; then
         export PYENV_ROOT="${HOME}/.pyenv"
     fi
+    # install pyenv if an existing version doesnt already exist
     if [[ ! -d "${PYENV_ROOT}" ]]; then
         curl https://pyenv.run | "${SHELL}"
         echo 'export PATH="${HOME}/.pyenv/bin:${PATH}"' >> "${HOME}/.bashrc"
@@ -118,6 +121,7 @@ setup_pyenv() {
         fi
         printf "\n${WARN}%s${NC}\n\n" "To enable pyenv in your current shell run: exec ${SHELL}"
     fi
+    # install python if it doesnt already exist
     if [[ ! -f "${HOME}"/.pyenv/versions/"${PYTHON_VERSION}"/bin/"${python_binary_name}" ]]; then
         "${PYENV_ROOT}"/bin/pyenv install "${PYTHON_VERSION}"
     fi
@@ -127,6 +131,7 @@ setup_pyenv() {
 
 setup_venv() {
     local python_binary_name="${PYTHON##*/}"
+
     if [[ ${CI} == true ]]; then
         hash pip || apt install python-pip
         hash virtualenv || pip install virtualenv
@@ -134,6 +139,7 @@ setup_venv() {
         hash pip || (printf "\n${ERR}%s${NC}\n" "ensure python-pip is installed before attempting to setup virtualenv" && exit 1)
         hash virtualenv || (printf "\n${ERR}%s${NC}\n" "ensure virtualenv is installed before attempting to setup a virtual environment" && exit 1)
     fi
+    # create virtualenv using specified python binary if it doesnt alredy exist
     if [[ ! -x "${PYTHON}" ]]; then
         virtualenv -p "${PYTHON##*/}" "${VENV}"
     fi
@@ -141,6 +147,7 @@ setup_venv() {
 
 trap_command() {
     local ret="$?"
+
     set +eo pipefail
     if [[ ! "${SKIP_CLEANUP}" == true ]]; then
         cleanup

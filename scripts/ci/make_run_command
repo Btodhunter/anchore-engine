@@ -30,18 +30,17 @@ main() {
         if [[ ! "${CI}" == true ]]; then
             trap 'trap_command' SIGINT SIGTERM ERR EXIT
         fi
-
         # Trap all bash commands & print to screen. Like using set -v but allows printing in color
         if [[ "${VERBOSE}" =~ (true|TRUE|y|Y|1) ]]; then
             set -o functrace
             trap 'printf "%s${INFO}+ $BASH_COMMAND${NC}\n" >&2' DEBUG
         fi
-
         # Activate virtualenv if it exists
         if [[ -f "${VENV_ACTIVATE}" ]]; then
             . "${VENV_ACTIVATE}"
         fi
 
+        # run function/script with all arguments passed
         "$@"
     else
         printf "\n${ERR}%s${NC}\n\n" "ERROR - ${COMMAND} is not a valid function or script name" >&2
