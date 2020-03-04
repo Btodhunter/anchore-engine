@@ -47,7 +47,7 @@ install_cluster_deps() {
 
     if [[ ! -x "${VENV}/bin/kind" ]]; then
         printf "\n${WARN}%s${NC}\n" "installing kind..."
-        curl -sSLo "${VENV}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
+        curl -qsSLo "${VENV}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
         chmod +x "${VENV}/bin/kind"
     fi
     if [[ ! -x "${VENV}/bin/helm" ]]; then
@@ -66,7 +66,7 @@ install_testing_deps() {
     mkdir -p .tox
     for p in "$@"; do
         if [[ ! "$(echo ${VENV}/bin/*)" =~ "$p" ]]; then
-            pip install "$p"
+            pip install -q "$p"
         fi
     done
 }
@@ -134,7 +134,7 @@ setup_venv() {
 
     if [[ ${CI} == true ]]; then
         hash pip || apt install python-pip
-        hash virtualenv || pip install virtualenv
+        hash virtualenv || pip install -q virtualenv
     else
         hash pip || (printf "\n${ERR}%s${NC}\n" "ensure python-pip is installed before attempting to setup virtualenv" && exit 1)
         hash virtualenv || (printf "\n${ERR}%s${NC}\n" "ensure virtualenv is installed before attempting to setup a virtual environment" && exit 1)
