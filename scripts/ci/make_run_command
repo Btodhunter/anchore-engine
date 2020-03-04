@@ -4,7 +4,7 @@
 set -eo pipefail
 
 display_usage() {
-    color_print WARN "usage: make < recipe_name >"
+    print_colorized WARN "usage: make < recipe_name >"
 }
 
 main() {
@@ -19,7 +19,7 @@ main() {
 
     # Check for valid input arguments
     if [[ "$#" -eq 0 ]]; then
-        color_print ERROR "ERROR - script requires input" >&2
+        print_colorized ERROR "ERROR - script requires input" >&2
         display_usage
         exit 1
     elif [[ "$1" =~ (help|-h) ]]; then
@@ -43,7 +43,7 @@ main() {
         # run function/script with all arguments passed
         "$@"
     else
-        color_print ERROR "ERROR - ${COMMAND} is not a valid function or script name" >&2
+        print_colorized ERROR "ERROR - ${COMMAND} is not a valid function or script name" >&2
         display_usage
         exit 1
     fi
