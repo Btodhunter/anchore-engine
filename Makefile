@@ -46,7 +46,6 @@ PYTHON_VERSION := 3.6.6
 .PHONY: build
 build: Dockerfile ## build dev image
 	@$(RUN_COMMAND) build
-	@$(PRINT) "Successfully built image -- " "$(TEST_IMAGE_NAME)"
 
 .PHONY: ci ## run full ci pipeline locally
 ci: test-unit test-integration build test-functional test-e2e push

@@ -4,21 +4,7 @@
 set -eo pipefail
 
 display_usage() {
-    printf "%s\n${WARN}Usage: $0 < function_name >${NC}\n\n"
-}
-
-display_make_usage() {
-    printf "%s\n${WARN}Usage: make < recipe_name >${NC}\n\n"
-}
-
-# The trap_command function runs whenever the script exits
-trap_command() {
-    local ret="$?"
-    set +eo pipefail
-    if [[ ! "${SKIP_CLEANUP}" == true ]]; then
-        cleanup
-    fi
-    exit "${ret}"
+    printf "\n${WARN}%s${NC}\n\n" "Usage: make < recipe_name >"
 }
 
 main() {
@@ -33,15 +19,17 @@ main() {
 
     # Check for valid input arguments
     if [[ "$#" -eq 0 ]]; then
-        printf "%s\t${ERR}ERROR - script requires input${NC}\n\n" >&2
+        printf "\n${ERR}%s${NC}\n\n" "ERROR - script requires input" >&2
         display_usage
         exit 1
     elif [[ "$1" =~ (help|-h) ]]; then
-        display_make_usage
+        display_usage
     # Check is the COMMAND var is a valid function or executable script
     elif declare -f "$1" &> /dev/null || [[ -x "$1" ]]; then
         # Trap all signals that cause script to exit & run trap_command function before exiting
-        trap 'trap_command' SIGINT SIGTERM ERR EXIT
+        if [[ ! "${CI}" == true ]]; then
+            trap 'trap_command' SIGINT SIGTERM ERR EXIT
+        fi
 
         # Trap all bash commands & print to screen. Like using set -v but allows printing in color
         if [[ "${VERBOSE}" =~ (true|TRUE|y|Y|1) ]]; then
@@ -56,7 +44,7 @@ main() {
 
         "$@"
     else
-        printf "%s\t${ERR}ERROR - ${COMMAND} is not a valid function or script name ${NC}\n\n" >&2
+        printf "\n${ERR}%s${NC}\n\n" "ERROR - ${COMMAND} is not a valid function or script name" >&2
         display_usage
         exit 1
     fi
