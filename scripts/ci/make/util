@@ -71,7 +71,7 @@ install_cluster_deps() {
 }
 
 install_testing_deps() {
-    print_colorized WARN "installing dependencies: $@"
+    print_colorized WARN "installing dependencies: $*"
     mkdir -p .tox
     for p in "$@"; do
         if [[ ! "$(echo ${VENV}/bin/*)" =~ "$p" ]]; then
