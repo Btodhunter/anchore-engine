@@ -105,6 +105,22 @@ push_rc_image() {
     fi
 }
 
+push_rebuild_image() {
+    local dev_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
+    local rebuild_image="${PROD_IMAGE_REPO}:${GIT_TAG}"
+
+    if [[ "${CI}" == true ]]; then
+        print_colorized WARN "pulling dev image for release candidate -- ${dev_image}"
+        docker pull "${dev_image}"
+
+        print_colorized WARN "tagging and pushing image -- ${rebuild_image}"
+        docker tag "${dev_image}" "${rebuild_image}"
+        docker push "${rebuild_image}"
+    else
+        print_colorized WARN "CI=true must be set to push image -- ${rebuild_image}"
+    fi
+}
+
 push_prod_image() {
     local prod_image="${PROD_IMAGE_REPO}:${GIT_TAG}"
     local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "${GIT_TAG}-rc*" --tags --abbrev=0)"
