@@ -46,17 +46,17 @@ install_cluster_deps() {
     local arch=$(uname | tr A-Z a-z)
 
     if [[ ! -x "${VENV}/bin/kind" ]]; then
-        printf "\n${WARN}%s${NC}\n" "installing kind..."
+        color_print WARN "installing kind..."
         curl -qsSLo "${VENV}/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-${arch}-amd64"
         chmod +x "${VENV}/bin/kind"
     fi
     if [[ ! -x "${VENV}/bin/helm" ]]; then
-        printf "\n${WARN}%s${NC}\n" "installing helm..."
+        color_print WARN "installing helm..."
         curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-${arch}-amd64.tar.gz" | tar xzf - -C "${VENV}/bin" --strip-components=1 "${arch}-amd64/helm"
         chmod +x "${VENV}/bin/helm"
     fi
     if [[ ! -x "${VENV}/bin/kubectl" ]]; then
-        printf "\n${WARN}%s${NC}\n" "installing kubectl..."
+        color_print WARN "installing kubectl..."
         curl -sSLo "${VENV}/bin/kubectl" "https://storage.googleapis.com/kubernetes-release/release/${KUBECTL_VERSION}/bin/${arch}/amd64/kubectl"
         chmod +x "${VENV}/bin/kubectl"
     fi
@@ -87,17 +87,18 @@ kind_cluster_up() {
     helm repo add stable https://kubernetes-charts.storage.googleapis.com
 }
 
-print() {
-    SKIP_CLEANUP=true
-    printf "\n${INFO}%s${WARN}%s${NC}\n\n" "$@"
+color_print() {
+    local color_code=$1
+    local message=$2
+    printf "\n${!color_code}%s${NORMAL}\n\n" "${message}"
 }
 
 setup_colors() {
     OK="\033[0;32m"
     WARN="\033[0;33m"
     INFO="\033[0;36m"
-    ERR="\033[0;31m"
-    NC="\033[0m"
+    ERROR="\033[0;31m"
+    NORMAL="\033[0m"
 }
 
 setup_pyenv() {
@@ -113,13 +114,13 @@ setup_pyenv() {
         echo 'eval "$(pyenv init -)"' >> "${HOME}/.bashrc"
         echo 'eval "$(pyenv virtualenv-init -)"' >> "${HOME}/.bashrc"
         chmod +x "${HOME}/.bashrc"
-        printf "\n${WARN}%s${NC}\n" "added pyenv config to ${HOME}/.bashrc"
+        color_print WARN "added pyenv config to ${HOME}/.bashrc"
         if [[ -f "${HOME}/.zshrc" ]]; then
             echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.zshrc"
         elif [[ -f "${HOME}/.bash_profile" ]]; then
             echo 'if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi' >> "${HOME}/.bash_profile"
         fi
-        printf "\n${WARN}%s${NC}\n\n" "To enable pyenv in your current shell run: exec ${SHELL}"
+        color_print WARN "to enable pyenv in your current shell run: exec ${SHELL}"
     fi
     # install python if it doesnt already exist
     if [[ ! -f "${HOME}"/.pyenv/versions/"${PYTHON_VERSION}"/bin/"${python_binary_name}" ]]; then
@@ -136,13 +137,15 @@ setup_venv() {
         hash pip || apt install python-pip
         hash virtualenv || pip install -q virtualenv
     else
-        hash pip || (printf "\n${ERR}%s${NC}\n" "ensure python-pip is installed before attempting to setup virtualenv" && exit 1)
-        hash virtualenv || (printf "\n${ERR}%s${NC}\n" "ensure virtualenv is installed before attempting to setup a virtual environment" && exit 1)
+        hash pip || (color_print ERROR "ensure python-pip is installed before attempting to setup virtualenv" && exit 1)
+        hash virtualenv || (color_print ERROR "ensure virtualenv is installed before attempting to setup a virtual environment" && exit 1)
     fi
     # create virtualenv using specified python binary if it doesnt alredy exist
     if [[ ! -x "${PYTHON}" ]]; then
         virtualenv -p "${PYTHON##*/}" "${VENV}"
     fi
+    color_print WARN "to enable virtual environment run: `source ${VENV_ACTIVATE}`"
+
 }
 
 trap_command() {

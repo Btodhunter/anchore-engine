@@ -31,7 +31,6 @@ HELM_VERSION := v3.1.1
 
 # Make environment configuration
 RUN_COMMAND := scripts/ci/make_run_command
-PRINT := VERBOSE=false $(RUN_COMMAND) print
 ENV := /usr/bin/env
 VENV := venv
 VENV_ACTIVATE = $(VENV)/bin/activate
@@ -48,7 +47,7 @@ build: Dockerfile ## build dev image
 	@$(RUN_COMMAND) build
 
 .PHONY: ci ## run full ci pipeline locally
-ci: test-unit test-integration build test-functional test-e2e push
+ci: build test push
 
 .PHONY: push push-dev
 push: push-dev ## push dev image to dockerhub
@@ -56,24 +55,24 @@ push-dev:
 	@$(RUN_COMMAND) push_dev_image
 
 .PHONY: push-rc
-push-rc: ## push rc image to dockerhub
+push-rc:
 	@$(RUN_COMMAND) push_rc_image
 
 .PHONY: push-prod
-push-prod: ## push production image to dockerhub
+push-prod:
 	@$(RUN_COMMAND) push_prod_image
 
 .PHONY: venv
-venv: $(VENV_ACTIVATE) ## setup virtual environment
+venv: $(VENV_ACTIVATE) ## setup virtual env
 $(VENV_ACTIVATE):
 	@$(RUN_COMMAND) setup_venv
 
 .PHONY: install
-install: venv setup.py requirements.txt ## install project to venv
+install: venv setup.py requirements.txt ## install project to virtual env
 	@$(RUN_COMMAND) install
 
 .PHONY: install-dev
-install-dev: venv setup.py requirements.txt ## install project to venv in editable mode
+install-dev: venv setup.py requirements.txt ## install project to virtual env in editable mode
 	@$(RUN_COMMAND) install_dev
 
 .PHONY: compose-up
@@ -81,61 +80,63 @@ compose-up: venv scripts/ci/docker-compose-ci.yaml ## run docker compose with de
 	@$(RUN_COMMAND) docker_compose_up
 
 .PHONY: compose-down
-compose-down: venv scripts/ci/docker-compose-ci.yaml ## stop docker-compose
+compose-down: venv scripts/ci/docker-compose-ci.yaml ## stop docker compose
 	@$(RUN_COMMAND) docker_compose_down
 
 .PHONY: cluster-up
-cluster-up: venv test/e2e/kind-config.yaml ## setup kind testing cluster
+cluster-up: venv test/e2e/kind-config.yaml ## run kind testing k8s cluster
 	@$(RUN_COMMAND) kind_cluster_up
 
 .PHONY: cluster-down
-cluster-down: venv ## delete kind testing cluster
+cluster-down: venv ## delete kind testing k8s cluster
 	@$(RUN_COMMAND) kind_cluster_down
 
 .PHONY: lint
 lint: venv ## lint code using pylint
 	@$(RUN_COMMAND) lint
 
-.PHONY: test test-unit
-test: test-unit ## run unit tests using tox
+.PHONY: test
+test: test-unit test-integration test-functional test-e2e ## run all test recipes -- test-unit, test-integration, test-functional, test-e2e
+
+.PHONY: test-unit
 test-unit: venv
 	@$(RUN_COMMAND) unit_tests
 
 .PHONY: test-integration
-test-integration: venv ## run integration tests using tox
+test-integration: venv
 	@$(RUN_COMMAND) integration_tests
 
 .PHONY: test-functional
-test-functional: compose-up ## run functional tests using tox
+test-functional: compose-up
 	@$(RUN_COMMAND) functional_tests
 	@$(MAKE) compose-down
 
 .PHONY: test-e2e
-test-e2e: cluster-up ## run e2e tests using kind/helm
+test-e2e: cluster-up
 	@$(RUN_COMMAND) e2e_tests
 	@$(MAKE) cluster-down
 
 .PHONY: clean-all
-clean-all: clean clean-tests clean-container ## run all clean jobs - clean, clean-tests, clean-container
+clean-all: clean clean-tests clean-container ## run all clean recipes -- clean, clean-tests, clean-container
 
-.PHONY: clean
-clean: ## delete all build directories, pycache & virtualenv
+.PHONY: clean clean-env
+clean: clean-env
+clean-env:
 	@$(RUN_COMMAND) clean_python_env
 
 .PHONY: clean-tests
-clean-tests: ## delete temporary test directories
+clean-tests:
 	@$(RUN_COMMAND) clean_tests
 
 .PHONY: clean-container
-clean-container: ## delete dev image
+clean-container:
 	@$(RUN_COMMAND) clean_container
 
 .PHONY: setup-dev
-setup-dev: setup-pyenv venv install-dev ## setup dev environment - install pyenv, python, venv, project
-	@$(PRINT) "Use this command to enable the virtual environment: " "source $(VENV_ACTIVATE)"
+setup-dev: setup-pyenv venv install-dev ## setup dev environment -- setup-pyenv, venv, install-dev
 
 .PHONY: setup-pyenv
-setup-pyenv: .python-version ## install pyenv, python and set local .python_version
+setup-pyenv: .python-version
 .python-version:
 	@$(RUN_COMMAND) setup_pyenv
 
@@ -146,4 +147,4 @@ printvars: ## print configured make environment vars
 .PHONY: help
 help:
 	@$(RUN_COMMAND) help
-	@grep -E '^[0-9a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\t\033[0;36m%-30s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[0-9a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[0;36m%-30s\033[0m %s\n", $$1, $$2}'

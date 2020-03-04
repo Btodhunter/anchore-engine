@@ -11,7 +11,7 @@ build() {
     fi
     docker build --target anchore-engine-builder ${no_build_cache} -t "${GIT_REPO}:builder" -f ./Dockerfile .
     docker build --build-arg ANCHORE_COMMIT="${COMMIT_SHA}" ${no_build_cache} --build-arg CLI_COMMIT="${CLI_COMMIT_SHA}" -t "${TEST_IMAGE_NAME}" -f ./Dockerfile .
-    printf "\n${WARN}%s${NC}\n" "Successfully built image -- ${TEST_IMAGE_NAME}"
+    color_print WARN "successfully built image -- ${TEST_IMAGE_NAME}"
 }
 
 lint() {
@@ -46,16 +46,16 @@ push_dev_image() {
     local latest_image="${DEV_IMAGE_REPO}:latest"
     local branch_image="${DEV_IMAGE_REPO}:${GIT_BRANCH}"
 
-    printf "\n${WARN}%s${NC}\n" "Tagging and pushing ${dev_image}"
+    color_print WARN "tagging and pushing ${dev_image}"
     docker tag "${TEST_IMAGE_NAME}" "${dev_image}"
     docker push "${dev_image}"
 
     if [[ "${GIT_BRANCH}" == 'master' ]]; then
-        printf "\n${WARN}%s${NC}\n" "tagging & pushing image -- ${latest_image}"
+        color_print WARN "tagging & pushing image -- ${latest_image}"
         docker tag "${dev_image}" "${latest_image}"
         docker push "${latest_image}"
     elif [[ "${GIT_BRANCH}" =~ "${RELEASE_BRANCHES}" ]]; then
-        printf "\n${WARN}%s${NC}\n" "tagging & pushing image -- ${branch_image}"
+        color_print WARN "tagging & pushing image -- ${branch_image}"
         docker tag "${dev_image}" "${branch_image}"
         docker push "${branch_image}"
     fi
@@ -69,7 +69,7 @@ e2e_tests() {
         local engine_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
     fi
 
-    printf "\n${WARN}%s${NC}\n" "Installing stable/anchore-engine Helm chart using -- ${engine_image}"
+    color_print WARN "installing stable/anchore-engine helm chart using -- ${engine_image}"
     helm install e2e-testing -f test/e2e/base-values.yaml --set anchoreEngineGlobal.image="${engine_image}" stable/anchore-engine | head -n6
 
     # Patch anchore-engine-api nodeport to the configured port thats mapped with kind to localhost:8228
@@ -86,14 +86,14 @@ push_rc_image() {
     local rc_image="${DEV_IMAGE_REPO}:${GIT_TAG}"
 
     if [[ "${CI}" == true ]]; then
-        printf "\n${WARN}%s${NC}\n" "Pulling dev image for release candidate -- ${dev_image}"
+        color_print WARN "pulling dev image for release candidate -- ${dev_image}"
         docker pull "${dev_image}"
 
-        printf "\n${WARN}%s${NC}\n" "Tagging and pushing image -- ${rc_image}"
+        color_print WARN "tagging and pushing image -- ${rc_image}"
         docker tag "${dev_image}" "${rc_image}"
         docker push "${rc_image}"
     else
-        printf "\n${WARN}%s${NC}\n" "CI=true must be set to push image -- ${rc_image}"
+        color_print WARN "CI=true must be set to push image -- ${rc_image}"
     fi
 }
 
@@ -102,20 +102,20 @@ push_prod_image() {
     local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "${GIT_TAG}-rc*" --tags --abbrev=0)"
 
     if [[ "${CI}" == true ]]; then
-        printf "\n${WARN}%s${NC}\n" "Pulling RC image for release -- ${rc_image}"
+        color_print WARN "pulling RC image for release -- ${rc_image}"
         docker pull "${rc_image}"
 
-        printf "\n${WARN}%s${NC}\n" "Tagging and pushing image -- ${prod_image}"
+        color_print WARN "tagging and pushing image -- ${prod_image}"
         docker tag "${rc_image}" "${prod_image}"
         docker push "${prod_image}"
 
         if [[ "${GIT_BRANCH}" =~ "${LATEST_RELEASE_BRANCH}" ]]; then
             local latest_image="${PROD_IMAGE_REPO}:latest"
-            printf "\n${WARN}%s${NC}\n" "Tagging and pushing image -- ${latest_image}"
+            color_print WARN "tagging and pushing image -- ${latest_image}"
             docker tag "${prod_image}" "${latest_image}"
             docker push "${latest_image}"
         fi
     else
-        printf "\n${WARN}%s${NC}\n" "CI=true must be set to push image -- ${prod_image}"
+        color_print WARN "CI=true must be set to push image -- ${prod_image}"
     fi
 }

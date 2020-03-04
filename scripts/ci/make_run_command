@@ -4,7 +4,7 @@
 set -eo pipefail
 
 display_usage() {
-    printf "\n${WARN}%s${NC}\n\n" "Usage: make < recipe_name >"
+    color_print WARN "usage: make < recipe_name >"
 }
 
 main() {
@@ -13,13 +13,13 @@ main() {
         . "$f"
     done
 
-    # Setup shell colors for print/echo statements
-    # ${OK}=green, ${WARN}=yellow, ${INFO}=cyan, ${ERR}=red, ${NC}=normal
+    # Setup shell colors for print statements
+    # ${OK}=green, ${WARN}=yellow, ${INFO}=cyan, ${ERROR}=red, ${NORMAL}=normal
     setup_colors
 
     # Check for valid input arguments
     if [[ "$#" -eq 0 ]]; then
-        printf "\n${ERR}%s${NC}\n\n" "ERROR - script requires input" >&2
+        color_print ERROR "ERROR - script requires input" >&2
         display_usage
         exit 1
     elif [[ "$1" =~ (help|-h) ]]; then
@@ -33,7 +33,7 @@ main() {
         # Trap all bash commands & print to screen. Like using set -v but allows printing in color
         if [[ "${VERBOSE}" =~ (true|TRUE|y|Y|1) ]]; then
             set -o functrace
-            trap 'printf "%s${INFO}+ $BASH_COMMAND${NC}\n" >&2' DEBUG
+            trap 'printf "%s${INFO}+ $BASH_COMMAND${NORMAL}\n" >&2' DEBUG
         fi
         # Activate virtualenv if it exists
         if [[ -f "${VENV_ACTIVATE}" ]]; then
@@ -43,7 +43,7 @@ main() {
         # run function/script with all arguments passed
         "$@"
     else
-        printf "\n${ERR}%s${NC}\n\n" "ERROR - ${COMMAND} is not a valid function or script name" >&2
+        color_print ERROR "ERROR - ${COMMAND} is not a valid function or script name" >&2
         display_usage
         exit 1
     fi
