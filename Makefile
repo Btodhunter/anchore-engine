@@ -10,7 +10,7 @@ VERBOSE ?=
 # Set CI=true when running in CircleCI. This setting will setup the proper env for CircleCI
 # All production & RC image push jobs to Dockerhub are gated on CI=true
 CI ?= false
-GIT_TAG ?= $(shell echo ${CIRCLE_TAG})
+GIT_TAG ?= $(shell echo $${CIRCLE_TAG})
 # Set SKIP_CLEANUP=true to prevent all exit cleanup tasks from running
 SKIP_CLEANUP ?= false
 # Use $CIRCLE_SHA if it's set, otherwise use SHA from HEAD

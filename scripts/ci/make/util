@@ -87,7 +87,10 @@ kind_cluster_down() {
 
 kind_cluster_up() {
     install_cluster_deps
-    kind create cluster --name e2e-testing --config test/e2e/kind-config.yaml --image "kindest/node:${KIND_NODE_IMAGE_TAG}" --wait 60s
+    if ! kind get clusters | grep e2e-testing; then
+        kind create cluster --name e2e-testing --config test/e2e/kind-config.yaml --image "kindest/node:${KIND_NODE_IMAGE_TAG}" --wait 60s
+    fi
+    kind export kubeconfig --name e2e-testing
     if [[ "$CI" == true ]]; then
         # create k8s secret using $DOCKER_USER & $DOCKER_PASS and set as default imagePullCreds
         kubectl create secret docker-registry anchore-enterprise-pullcreds --docker-server=docker.io --docker-username="${DOCKER_USER}" --docker-password="${DOCKER_PASS}" --docker-email=anchoreci@anchore.com
