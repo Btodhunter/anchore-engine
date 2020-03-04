@@ -121,7 +121,7 @@ push_rebuild_image() {
     fi
 }
 
-push_prod_image() {
+push_release_image() {
     local prod_image="${PROD_IMAGE_REPO}:${GIT_TAG}"
     local rc_image="${DEV_IMAGE_REPO}:$(git describe --match "${GIT_TAG}-rc*" --tags --abbrev=0)"
 
