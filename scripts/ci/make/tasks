@@ -38,8 +38,6 @@ functional_tests() {
     anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system wait --feedsready ''
     anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system status
     tox test/functional
-    python scripts/tests/aetest.py docker.io/alpine:latest
-    python scripts/tests/aefailtest.py docker.io/alpine:latest
 }
 
 push_dev_image() {
@@ -74,7 +72,8 @@ e2e_tests() {
     # Run API endpoint health tests
     install_testing_deps anchorecli
     anchore-cli --u admin --p foobar system wait --timeout 300 --interval 10 --feedsready '' --servicesready 'catalog,apiext,policy_engine,simplequeue,analyzer'
-    anchore-cli --u admin --p foobar system status
+    python scripts/tests/aetest.py docker.io/alpine:latest
+    python scripts/tests/aefailtest.py docker.io/alpine:latest
 }
 
 push_rc_image() {
