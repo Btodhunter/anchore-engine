@@ -237,7 +237,7 @@ workflows:
           filters: *filter_rc_tags
           requires:
             - push_rc_image
-          image_name: ${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}-dev:${CIRCLE_TAG}
+          image_name: btodhunter/anchore-engine-dev:${CIRCLE_TAG}
           private_registry: true
           timeout: '2000'
 
