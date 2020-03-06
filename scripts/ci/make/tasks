@@ -75,12 +75,12 @@ e2e_tests() {
     elif docker inspect "${TEST_IMAGE_NAME}"; then
         engine_image="${TEST_IMAGE_NAME}"
         print_colorized WARN "using local dev image for testing -- ${engine_image}"
+        kind load docker-image "${engine_image}" --name e2e-testing
     else
         local engine_image="${DEV_IMAGE_REPO}:${COMMIT_SHA}"
         print_colorized WARN "using remote dev image for testing -- ${engine_image}"
     fi
     local helm_deploy_name="e2e-testing-${RANDOM:0:5}"
-
     helm repo add stable https://kubernetes-charts.storage.googleapis.com
     helm install "${helm_deploy_name}" -f test/e2e/base-values.yaml --set anchoreGlobal.image="${engine_image}" stable/anchore-engine | head -n6
 
@@ -90,8 +90,8 @@ e2e_tests() {
     install_testing_deps anchorecli
     anchore-cli --u admin --p foobar system wait --timeout 300 --interval 10 --feedsready '' --servicesready 'catalog,apiext,policy_engine,simplequeue,analyzer'
     anchore-cli --u admin --p foobar --url http://localhost:8228/v1 system status
-    python scripts/tests/aetest.py docker.io/alpine:latest
-    python scripts/tests/aefailtest.py docker.io/alpine:latest
+    "${PYTHON}" scripts/tests/aetest.py docker.io/alpine:latest
+    "${PYTHON}" scripts/tests/aefailtest.py docker.io/alpine:latest
 }
 
 push_rc_image() {
